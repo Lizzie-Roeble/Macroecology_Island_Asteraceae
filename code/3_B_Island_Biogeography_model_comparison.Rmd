@@ -1,0 +1,897 @@
+---
+title: 'Island biogeography patterns: Model comparison'
+output: html_document
+date: "2023-10-04"
+---
+
+# Overview
+
+Aim: Select the best global model that explains which island features and environmental variables are linked with (1) native species richness and (2) proportion of island endemics. We are starting with a candidate pool of predictors (below) that are known to be linked to insular diversity (MacArthur 1967; Whittaker 2008; Kreft 2008). In order to select the best global model (ie. the simplest model that captures the most variation), this script builds a selection of candidate models, carries out model comparison, and selects the best global model based on the AIC score. Model section/model fit and model validation/adequacy are two separate steps (see Harrison 2018); in the script `3_B_Island_biogeography_patterns_global_model.Rmd` the global models are fit and in-depth model validation is performed.
+
+Model approach: We use generalized linear mixed models (GLMMs) to understand which island features and environmental variables are linked to Asteraceae (1) native species richness (NSR) and (2) proportion of single island endemics (pSIE) across islands. We opted for a mixed model approach because previous research has highlighted the importance of accounting for the natural structure and non-independence of island observational data (i.e., islands, archipelagos, and taxa) and GLMMs provide more flexibility in dealing with non-normally distributed count data (Bolker.2009; O'Hara.2009; O'Hara.2010; Bunnefeld.2012).
+
+Main steps (Outline):
+
+1.  Data exploration: summary and key point
+    1.  Model components
+2.  Model testing
+    1.  Native species richness (NSR)
+
+        1.  Model comparison
+
+    2.  Proportion endemic species (pSIE)
+
+        1.  Model comparison
+3.  Save model comparison tables
+
+## Preparation
+
+Load libraries:
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(svglite)
+# modeling packages
+library(easystats)
+library(GGally)
+library(lme4) 
+library(glmmTMB)
+```
+
+Load data:
+
+`Asteraceae_island_env_diversity.xlsx` is a cleaned dataset that has all the strictly island units in GIFT3 with island feature data and a summary of their diversity (natives and endemics). This dataset started with the extraction and cleaning in 0_data_preparation.Rmd, and then diversity per geographic unit calculated in `2_A_Geographic_diversity.Rmd`. Note: `entity_type` has been manually created to filter to true islands, and `Asteraceae_island_env_diversity.xlsx` has filtered out all island groups and island parts.
+
+```{r}
+island_env_diversity <- read_xlsx("../data/data_clean/Asteraceae_island_env_diversity.xlsx")
+```
+
+Calculate proportion endemism
+
+```{r}
+island_env_diversity$pSIE <- island_env_diversity$Endemic_species_list/island_env_diversity$Native_species
+```
+
+Simplify the climatic variable names:
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio1 = "mean_CHELSA_bio1_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio12 = "mean_CHELSA_bio12_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio4 = "mean_CHELSA_bio4_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio15 = "mean_CHELSA_bio15_1981-2010_V.2.1")
+```
+
+Filter out islands that are below 1km2. Following approach in Taylor (2020) and discussion with PW (Aug 2022) - GIFT data has a bias for checklists of small islands due to previous research in the lab and islands smaller than 1km2 not accurately represented by the scale of the environmental data.
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  filter(area >= 1)
+```
+
+
+
+This reduces the dataset from 791 islands to 514 islands.
+
+Transform skewed predictor variables, according to data exploration in `3_A_Island_biogeography_data_exploration.Rmd`. Skewed variables are log10 transformed, and variables that have 0 in range are log10+1 transformed.
+
+```{r}
+# area
+island_env_diversity$area_log <- log10(island_env_diversity$area)
+
+# distance
+island_env_diversity$dist_log <- log10(island_env_diversity$dist +1)
+
+# SLMP
+island_env_diversity$SLMP_log <- log10(island_env_diversity$SLMP)
+
+# mean elevation
+island_env_diversity$mean_mn30_grd_log <- log10(island_env_diversity$mean_mn30_grd +1)
+
+# max elevation
+island_env_diversity$max_mx30_grd_log <- log10(island_env_diversity$max_mx30_grd +1)
+
+# terrain ruggedness 
+island_env_diversity$mean_mn30_grd_TRI_log <- log10(island_env_diversity$mean_mn30_grd_TRI +1)
+
+# precipitation
+island_env_diversity$mean_CHELSA_bio12_log <- log10(island_env_diversity$mean_CHELSA_bio12)
+
+# temperature seasonality 
+island_env_diversity$mean_CHELSA_bio4_log <- log10(island_env_diversity$mean_CHELSA_bio4)
+
+# precipitation seasonality 
+island_env_diversity$mean_CHELSA_bio15_log <- log10(island_env_diversity$mean_CHELSA_bio15)
+```
+
+Scale and center the predictor variables.
+
+```{r}
+predictor = c("area_log", "dist_log",	"SLMP_log", "mean_mn30_grd_log",	"max_mx30_grd_log",	"mean_mn30_grd_TRI_log", "mean_CHELSA_bio1",	"mean_CHELSA_bio12_log",	"mean_CHELSA_bio4_log",
+              "mean_CHELSA_bio15_log")
+island_env_diversity[,predictor] = scale(island_env_diversity[,predictor], center = TRUE, scale = TRUE)
+```
+
+Convert SLMP to a more intuitive measure of isolation: multiple by -1.
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  mutate(SLMP_log = SLMP_log*(-1))
+```
+
+# Data exploration: summary and key points
+
+In the script `3_A_Island_biogoegraphy_data_exploration.Rmd`, we carried out the initial data exploration following Zuur et al. (2010), which included an overview of initial GIFT island variables, scan of outliers, check for normality and zero-inflation, check for any missing data in predictor variables, collinearity of predictors, initial assessment of pair-wise relationships, and discussion of independence in the response variable.
+
+Key points:
+
+-   *Normality and zero inflation (Y):* Both native species and endemic species are not normally distributed and have a strong right skew. Endemic species has high zero inflation - 84% of the islands have 0 endemic species. Action: use generalized linear mixed effect models (glmms) with a Poisson or negative binomial error distribution to address main questions, and explore zero-inflated glmmm for endemic species.
+
+-   *Missing data (X):* Island age (age_Ma) has a lot of missing data - 66% of the islands lacking an age. Action: separate analysis with age for oceanic islands with age available, following methods in Taylor (2021).
+
+-   *Collinearity:* Correlation matrix detected potential collinearity in several key predictor variables: distance-SLMP, distance-LGM_area, SLMP_LGM_area, temperature-precipitation, temperature-all elevation variables, and all elevation variables have strong correlation (ie mean_mn30_grd, mean_mx30_grd, TRI). Action: Select subset of predictor variables that have no or minimal correlation and select single predictor where variables overlap (ie only one of the elevation parameters to best explain insular elevation range, and SLMP or distance as the best measure of isolation). Calculate VIF of the global (most complex) model and reanalyze and update model if needed.
+
+-   *Independence (Y):* There is non-independence in the island data due to geographic structure of islands to archipelagos. Action: archipelago as random effect in a mixed model ((g)lmm).
+
+-   *Skewness of predictor variables:* The distribution of the continuous predictor variables were plotted raw and with a log10 transformation (log10+1 if variable had 0s) to examine where transformation is needed and appropriate. The summary of transformations needed listed above.
+
+## Model components 
+
+Global model components.
+
+*Response variables* (2 separate models):
+
+-   Native species richness (NSR)
+
+-   Proportion of single island endemics (pSIE)
+
+*Predictor variables* (Island features and environmental variables). Model comparison to select the best predictors from this starting pool:
+
+-   Area
+
+-   Distance or SLMP
+
+-   Island type (oceanic / continental)
+
+-   Max altitude (max_mx30_grd)
+
+-   Terrain ruggedness (mean_mn30_grd_TRI)
+
+-   Mean annual temperature
+
+-   Mean annual precipitation
+
+-   Temperature seasonality
+
+-   Precipitation seasonality
+
+-   Island age (separate model with only oceanic islands)
+
+*Random effect*
+
+-   Archipelago
+
+# Model testing
+
+## Native species richness
+
+**Model key**
+
+`m_nsr_1`: glm (poisson); area
+
+
+`m_nsr_2`: glm (poisson); distance
+
+`m_nsr_1_b`: glm (nb); area
+
+`m_nsr_3`: glmm (nb); area; archipelago
+
+
+`m_nsr_4`: glmm (nb); area; archipelago; (\|\|)
+
+
+`m_nsr_5`: glmm (nb); area; archipelago; (\|\|); zi
+
+`m_nsr_6`: glmm (nb); area + dist; archipelago; (\|\|)
+
+
+`m_nsr_7`: glmm (nb); area + dist; archipelago; (\|\|); zi
+
+
+`m_nsr_8`: glmm (nb); area + dist; archipelago
+
+
+`m_nsr_9`: glmm (nb); area + SLMP; archipelago
+
+
+`m_nsr_10`: glmm (nb); area + SLMP + island_type; archipelago
+
+`m_nsr_11`: glmm (nb); area + SLMP + island_type + max_mx30_grd; archipelago
+
+`m_nsr_12`: glmm (nb); area + SLMP + island_type + mean_mn30_grd_TRI; archipelago
+
+
+`m_nsr_13`: glmm (nb); area + SLMP + island_type + max_mx30_grd + mean_mn30_grd_TRI; archipelago
+
+`m_nsr_14`: glmm (nb); area + SLMP + island_type + max_mx30_grd + ann_temp; archipelago
+
+`m_nsr_15`: glmm (nb); area + SLMP + island_type + max_mx30_grd + ann_precip; archipelago
+
+`m_nsr_16`: glmm (nb); area + SLMP + island_type + max_mx30_grd + ann_temp + ann_precip; archipelago
+
+`m_nsr_17`: glmm (nb); area + SLMP + island_type + max_mx30_grd + temp_seas; archipelago
+
+`m_nsr_18`: glmm (nb); area + SLMP + island_type + max_mx30_grd + precip_seas; archipelago
+
+`m_nsr_19`: glmm (nb); area + SLMP + island_type + max_mx30_grd + temp_seas + precip_seas; archipelago
+
+### glm with area and isolation
+
+Start with the simplest model to explore the relationship between area and isolation on native species richness.
+
+Details: GLM with single predictor, log transform predictor variable, poisson distribution:
+
+```{r}
+# total species ~ area
+m_nsr_1 <- glmmTMB(Native_species ~ area_log, data = island_env_diversity, family=poisson(link="log"))
+summary(m_nsr_1)
+check_model(m_nsr_1)
+
+# total species ~ isolation
+m_nsr_2 <- glmmTMB(Native_species ~ dist_log, data = island_env_diversity, family=poisson(link="log"))
+summary(m_nsr_2)
+check_model(m_nsr_2)
+```
+
+Visualize the relationships.
+
+```{r, warning=FALSE}
+# total species ~ area
+plot_glm_sp_area <- ggplot(island_env_diversity, aes(area_log, log(Native_species))) +
+   geom_point() +
+   labs(y = "Species number (log10)", x = "Island area (log10 km)", title = "Native species richness ~ area") +
+   stat_smooth(method = "glm",colour = "#1e90ff", size = 0.75, method.args = list(family= "poisson")) +
+  theme_bw()
+
+# total species ~ isolation
+plot_glm_sp_dist <- ggplot(island_env_diversity, aes(dist_log, log(Native_species))) +
+   geom_point() +
+   labs(y = "Species number (log10)", x = "Island distance (log10 km)", title = "Native species richness ~ isolation") +
+   stat_smooth(method = "glm",colour = "#1e90ff", size = 0.75, method.args = list(family= "poisson")) +
+  theme_bw()
+
+# combine into one plot
+glm_plots <- (plot_glm_sp_area + plot_glm_sp_dist) +  plot_annotation(title = "GLM: relationship between Native species richness and area and isolation")
+glm_plots
+```
+
+### Finding best error distribution
+
+Use performance::check_distribution() function to help check a models' distributional family and see if the model-family probably should be reconsidered
+
+```{r}
+check_distribution(m_nsr_1)
+check_distribution(m_nsr_2)
+```
+
+Suggests for native species to consider neg. binomial (zero-infl.). This is supported by the literature as well. The negative binomial is increasingly being considered best the starting distribution for modelling ecological count data; see Stoklosa, J., Blakey, R. V. & Hui, F. K. C. (2022). An Overview of Modern Applications of Negative Binomial Modelling in Ecology and Biodiversity. Diversity, 14(5), 320. [https://doi.org/10.3390/d14050320](https://doi.org/10.3390/d14050320*)
+
+Does changing the error distribution improve the models?
+
+```{r}
+# total species ~ area 
+# negative binomial
+m_nsr_1_b <- glmmTMB(Native_species ~ log10(area+1), 
+                          family = nbinom2,
+                          data = island_env_diversity)
+summary(m_nsr_1_b)
+check_model(m_nsr_1_b)
+
+compare_performance(m_nsr_1, m_nsr_1_b)
+```
+
+Changing to negative binomial error distribution for native species greatly improved model.
+
+### Generalized linear mixed effects model
+
+Add complexity to the model: random effect. There is non-independence in the island data due to geographic structure of islands to archipelagos. Account for this by including archipelago as random effect in a mixed model ((g)lmm). See Bunnefeld, N. & Phillimore, A. B. (2012). Island, archipelago and taxon effects: mixed models as a means of dealing with the imperfect design of nature's experiments. Ecography, 35(1), 15--22. <https://doi.org/10.1111/j.1600-0587.2011.07078.x> for more details.
+
+
+glmm: negative binomial; one predictor variable (area); and archipelago as random effect
+
+```{r}
+# archipelago as a random effect with a random intercept and mixed mean; (1|group)
+m_nsr_3 <- glmmTMB(Native_species ~
+                   area_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_3)
+
+# archipelago as a random effect with an uncorrelated random slope and intercept; (fixed effect||random effect)
+m_nsr_4 <- glmmTMB(Native_species ~
+                   area_log + (area_log||archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_4)
+```
+
+Compare models:
+
+```{r}
+# m1_b: glm with negative binomial 
+# m5: glmm with archipelago as a random effect with a random intercept and mixed mean
+# m6: glmm with archipelago as a random effect with an uncorrelated random slope and intercept
+
+compare_performance(m_nsr_1_b, m_nsr_3, m_nsr_4)
+```
+
+A glmm with archipelago as a random effect with an uncorrelated random slope and intercept improved the model.
+
+
+Does adding in zero-inflation improve the model?
+
+```{r}
+# archipelago as a random effect with an uncorrelated random slope and intercept; (fixed effect||random effect)
+m_nsr_5 <- glmmTMB(Native_species ~
+                   area_log + (area_log||archipelago),
+              family = nbinom2,
+              ziformula=~1,
+              data = island_env_diversity)
+summary(m_nsr_5)
+```
+
+```{r}
+compare_performance(m_nsr_4, m_nsr_5)
+```
+
+Move forward without zero-inflation. But be aware to check for zero-inflation in the final global model.
+
+```{r}
+# add distance
+m_nsr_6 <- glmmTMB(Native_species ~
+                   area_log + dist_log + (area_log||archipelago) + (dist_log||archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_6)
+```
+
+Error message: Model convergence problem; non-positive-definite Hessian matrix. See vignette('troubleshooting'). <https://cran.r-project.org/web/packages/glmmTMB/vignettes/troubleshooting.html>
+
+
+Troubleshooting: Try adding in zero inflation to the model.
+
+```{r}
+m_nsr_7 <- glmmTMB(Native_species ~
+                   area_log + dist_log + (area_log||archipelago) + (dist_log||archipelago),
+              family = nbinom2,
+              ziformula=~1,
+              data = island_env_diversity)
+summary(m_nsr_7)
+```
+
+Model ran without warning. But are the fixed effects coefficients extreme?
+
+```{r}
+fixef(m_nsr_7)
+```
+
+Zero-inflation intercept parameter is very small -21.7.
+
+Is the model too complex? Add predictor variables to a glmm with random effect included as (1\|archipelago) - Advice following discussion with PW (June 2022).
+
+```{r}
+# add distance and archipelago random intercept and fixed mean (1|group)
+m_nsr_8 <- glmmTMB(Native_species ~
+                   area_log + dist_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_8)
+```
+
+Compare isolation predictors: distance vs SLMP.
+
+```{r}
+m_nsr_9 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_9)
+```
+
+SLMP much better predictor, more forward with SLMP for isolation.
+
+```{r}
+# Add island type
+m_nsr_10 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_10)
+```
+
+```{r}
+# Add max altitude
+m_nsr_11 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_11)
+```
+
+Compare max elevation with TRI.
+
+```{r}
+m_nsr_12 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_12)
+```
+
+Add both TRI and max elevation.
+
+```{r}
+# Add terrain ruggedness
+m_nsr_13 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_13)
+check_model(m_nsr_13, check = "vif")
+```
+
+When including both, neither are significant. And the AIC got worse. Additionally, there are issues with collinearity. Need to choose either max alt or TRI. Action: move forward with max altitude.
+
+```{r}
+# Add mean temperature (not transformed)
+m_nsr_14 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_14)
+```
+
+The model AIC improved with temp, but temp is not a significant predictor.
+
+```{r}
+# Add mean precipitation
+m_nsr_15 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio12_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_15)
+```
+
+```{r}
+# Add mean temp and precipitation
+m_nsr_16 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + mean_CHELSA_bio12_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_16)
+```
+
+Including individually mean annual temp or mean annual percip improved the model AIC but neither were significant.
+
+```{r}
+# Add temperature seasonality
+m_nsr_17 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_17)
+```
+
+Temp seasonality significant and greatly improved the model. Much better than mean annual temp.
+
+```{r}
+# Add precip seasonality 
+m_nsr_18 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_18)
+```
+
+```{r}
+# Add temp seasonality and precip seasonality 
+m_nsr_19 <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr_19)
+```
+
+### Model comparison
+
+Compare models: the build up of the glmm with biological relevant predictors.
+
+```{r}
+m_nsr_compare <- compare_performance(m_nsr_8, m_nsr_9, m_nsr_10, m_nsr_11, m_nsr_12, m_nsr_13, m_nsr_14, m_nsr_15, m_nsr_16, m_nsr_17, m_nsr_18, m_nsr_19)
+
+m_nsr_compare
+```
+
+Visualize model comparison.
+
+```{r}
+plot(compare_performance(m_nsr_8, m_nsr_9, m_nsr_10, m_nsr_11, m_nsr_12, m_nsr_13, m_nsr_14, m_nsr_15, m_nsr_16, m_nsr_17, m_nsr_18, m_nsr_19))
+```
+
+```{r}
+# plot top 2
+plot(compare_performance(m_nsr_17, m_nsr_19))
+```
+
+Model 17 has the best AIC score. Move forward with Model 17: glmm (nb); area + SLMP + island_type + max_mx30_grd + temp_seas; (1\|archipelago)
+
+## Proportion endemic species (pSIE)
+
+**Model key**
+
+`m_pSIE_1`: glm (binomial); area
+
+
+`m_pSIE_2`: glm (binomial); distance
+
+`m_pSIE_3`: glmm (b-b); area; archipelago
+
+
+`m_pSIE_4`: glmm (b-b); area + dist; archipelago
+
+
+`m_pSIE_5`: glmm (b-b); area + SLMP; archipelago
+
+
+`m_pSIE_6`: glmm (b-b); area + SLPM + island_type; archipelago
+
+
+`m_pSIE_7`: glmm (b-b); area + SLMP + island_type + max_mx30_grd; archipelago
+
+
+`m_pSIE_8`: glmm (b-b); area + SLMP + island_type + mean_mn30_grd_TRI; archipelago
+
+
+`m_pSIE_9`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + mean_mn30_grd_TRI; archipelago
+
+`m_pSIE_10`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + ann_temp; archipelago
+
+
+`m_pSIE_11`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + ann_precip; archipelago
+
+`m_pSIE_12`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + ann_temp + ann_precip; archipelago
+
+`m_pSIE_13`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + temp_seas; archipelago
+
+`m_pSIE_14`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + precip_seas; archipelago
+
+`m_pSIE_15`: glmm (b-b); area + SLMP + island_type + max_mx30_grd + temp_seas + precip_seas; archipelago
+
+### GLM with area and isolation
+
+```{r}
+# area
+m_pSIE_1 <- glmmTMB(pSIE ~ area_log, 
+                    data = island_env_diversity, 
+                    family=binomial)
+summary(m_pSIE_1)
+```
+
+```{r}
+# distance
+m_pSIE_2 <- glmmTMB(pSIE ~ dist_log, 
+                    data = island_env_diversity, 
+                    family=binomial)
+summary(m_pSIE_2)
+
+```
+
+### Finding best error distribution
+
+```{r}
+check_distribution(m_pSIE_1)
+check_distribution(m_pSIE_2)
+```
+
+Beta-binomial error distribution recommended.
+
+### Generalized linear mixed effects models
+
+```{r}
+# area and distance
+m_pSIE_3 <- glmmTMB(pSIE ~
+                   area_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_3)
+```
+
+```{r}
+# area and distance
+m_pSIE_4 <- glmmTMB(pSIE ~
+                   area_log + dist_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_4)
+```
+
+```{r}
+# SLMP instead of dist
+m_pSIE_5 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_5)
+```
+
+```{r}
+# add island type
+m_pSIE_6 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_6)
+```
+
+```{r}
+# add max altitude
+m_pSIE_7 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_7)
+```
+
+```{r}
+# TRI
+m_pSIE_8 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + mean_mn30_grd_TRI_log+ (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_8)
+```
+
+```{r}
+# add max alt and TRI
+m_pSIE_9 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_9)
+check_model(m_pSIE_9, check = "vif")
+```
+
+Neither of the elevation variables are significant, and have correlation. Move forward with max elevation.
+
+```{r}
+# add mean ann temp 
+m_pSIE_10 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_10)
+```
+
+```{r}
+# mean ann precip only
+m_pSIE_11 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio12_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_11)
+```
+
+```{r}
+# add mean annual temp and precip
+m_pSIE_12 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 +  mean_CHELSA_bio12_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_12)
+```
+
+Precipitation is not significant. But mean annual temp is significant.
+
+```{r}
+# add temp seasonality
+m_pSIE_13 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_13)
+```
+
+```{r}
+# add precip seasonality
+m_pSIE_14 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_14)
+```
+
+```{r}
+# add seasonality and aridity
+m_pSIE_15 <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE_15)
+```
+
+Temp and precip seasonality are not significant for the endemic species models.
+
+### Model comparison
+
+```{r}
+compare_performance(m_pSIE_4, m_pSIE_5, m_pSIE_6, m_pSIE_7, m_pSIE_8, m_pSIE_9, m_pSIE_10, m_pSIE_11, m_pSIE_12, m_pSIE_13, m_pSIE_14, m_pSIE_15)
+```
+
+```{r}
+# Plot top 3
+plot(compare_performance(m_pSIE_10, m_pSIE_6, m_pSIE_14))
+```
+
+The proportion endemism model with the lowest AIC = model 10: glmm (b-b); area + SLMP + island_type + max_mx30_grd + ann_temp; archipelago.
+
+# Save model comparison table
+
+Compare all models for native species richness.
+
+```{r}
+model_comparison_nsr <- compare_performance(m_nsr_1,
+                                        m_nsr_2,
+                                        m_nsr_3,
+                                        m_nsr_4,
+                                        m_nsr_5,
+                                        m_nsr_6,
+                                        m_nsr_7,
+                                        m_nsr_8,
+                                        m_nsr_9, 
+                                        m_nsr_10, 
+                                        m_nsr_11, 
+                                        m_nsr_12, 
+                                        m_nsr_13, 
+                                        m_nsr_14, 
+                                        m_nsr_15, 
+                                        m_nsr_16, 
+                                        m_nsr_17, 
+                                        m_nsr_18, 
+                                        m_nsr_19, 
+                                        # remove if want all metrics
+                                        metrics = c("AIC", "AICc", "BIC", "R2"))
+model_comparison_nsr
+```
+
+Rename the models to match the formula.
+
+```{r}
+model_comparison_nsr[model_comparison_nsr == "m_nsr_1"] <- "NSR~area"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_2"] <- "NSR~dist"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_3"] <- "NSR~area+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_4"] <- "NSR~area+(area||arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_5"] <- "NSR~area+(area||arch); zi"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_6"] <- "NSR~area+dist+(area||arch)+(dist||arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_7"] <- "NSR~area+dist+(area||arch)+(dist||arch); zi"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_8"] <- "NSR~area+dist+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_9"] <- "NSR~area+SLMP+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_10"] <- "NSR~area+SLMP+itype+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_11"] <- "NSR~area+SLMP+itype+mxelv+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_12"] <- "NSR~area+SLMP+itype+TRI+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_13"] <- "NSR~area+SLMP+itype+mxelv+TRI+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_14"] <- "NSR~area+SLMP+itype+mxelv+anntemp+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_15"] <- "NSR~area+SLMP+itype+mxelv+annprecip+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_16"] <- "NSR~area+SLMP+itype+mxelv+anntemp+annprecip+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_17"] <- "NSR~area+SLMP+itype+mxelv+tempseas+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_18"] <- "NSR~area+SLMP+itype+mxelv+precipseas+(1|arch)"
+model_comparison_nsr[model_comparison_nsr == "m_nsr_19"] <- "NSR~area+SLMP+itype+mxelv+tempseas+precipseas+(1|arch)"
+print_html(model_comparison_nsr)
+```
+
+Format the table to get publication ready.
+
+```{r}
+# change significant digits 
+model_comparison_nsr$AIC <- round(model_comparison_nsr$AIC, 1)
+model_comparison_nsr$AICc <- round(model_comparison_nsr$AICc, 1)
+model_comparison_nsr$BIC <- round(model_comparison_nsr$BIC, 1)
+model_comparison_nsr$R2_conditional <- round(model_comparison_nsr$R2_conditional, 2)
+model_comparison_nsr$R2_marginal <- round(model_comparison_nsr$R2_marginal, 2)
+
+# Remove the weights column and change names
+model_comparison_nsr <- model_comparison_nsr %>%
+  select(-contains("_wt")) %>%
+  rename("Model type" = "Model") %>%
+  rename("Model" = "Name") %>%
+  rename("R2 conditional" = "R2_conditional") %>%
+  rename("R2 marginal" = "R2_marginal") 
+```
+
+```{r}
+# save as output table
+write_xlsx(model_comparison_nsr, "../outputs/3_Island_biogeography_models/model_comparison_nsr.xlsx")
+```
+
+Proportion endemism model comparison.
+
+```{r}
+model_comparison_pSIE <- compare_performance(m_pSIE_1, 
+                                             m_pSIE_2,
+                                             m_pSIE_3,
+                                             m_pSIE_4,
+                                             m_pSIE_5, 
+                                             m_pSIE_6, 
+                                             m_pSIE_7, 
+                                             m_pSIE_8, 
+                                             m_pSIE_9, 
+                                             m_pSIE_10, 
+                                             m_pSIE_11, 
+                                             m_pSIE_12, 
+                                             m_pSIE_13, 
+                                             m_pSIE_14, 
+                                             m_pSIE_15,
+                                             # remove if want all metrics
+                                             metrics = c("AIC", "AICc", "BIC", "R2"))
+model_comparison_pSIE
+```
+
+Rename the models to match the formula.
+
+```{r}
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_1"] <- "pSIE~area"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_2"] <- "pSIE~dist"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_3"] <- "pSIE~area+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_4"] <- "pSIE~area+dist+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_5"] <- "pSIE~area+SLMP+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_6"] <- "pSIE~area+SLMP+itype+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_7"] <- "pSIE~area+SLMP+itype+mxelv+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_8"] <- "pSIE~area+SLMP+itype+TRI+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_9"] <- "pSIE~area+SLMP+itype+mxelv+TRI+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_10"] <- "pSIE~area+SLMP+itype+mxelv+anntemp+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_11"] <- "pSIE~area+SLMP+itype+mxelv+annprecip+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_12"] <- "pSIE~area+SLMP+itype+mxelv+anntemp+annprecip+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_13"] <- "pSIE~area+SLMP+itype+mxelv+tempseas+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_14"] <- "pSIE~area+SLMP+itype+mxelv+precipseas+(1|arch)"
+model_comparison_pSIE[model_comparison_pSIE == "m_pSIE_15"] <- "pSIE~area+SLMP+itype+mxelv+tempseas+precipseas+(1|arch)"
+
+print_html(model_comparison_pSIE)
+```
+
+Format the table to get publication ready.
+
+```{r}
+# change significant digits 
+model_comparison_pSIE$AIC <- round(model_comparison_pSIE$AIC, 1)
+model_comparison_pSIE$AICc <- round(model_comparison_pSIE$AICc, 1)
+model_comparison_pSIE$BIC <- round(model_comparison_pSIE$BIC, 1)
+model_comparison_pSIE$R2_conditional <- round(model_comparison_pSIE$R2_conditional, 2)
+model_comparison_pSIE$R2_marginal <- round(model_comparison_pSIE$R2_marginal, 2)
+
+# Remove the weights column and change names
+model_comparison_pSIE <- model_comparison_pSIE %>%
+  select(-contains("_wt")) %>%
+  rename("Model type" = "Model") %>%
+  rename("Model" = "Name") %>%
+  rename("R2 conditional" = "R2_conditional") %>%
+  rename("R2 marginal" = "R2_marginal") 
+```
+
+```{r}
+# save as output table
+write_xlsx(model_comparison_pSIE, "../outputs/3_Island_biogeography_models/model_comparison_pSIE.xlsx")
+```

@@ -1,0 +1,709 @@
+---
+title: "Geographic diversity on islands"
+output: html_document
+date: "2023-09-27"
+---
+
+# Overview
+
+Aim: Understand and explore the geographic patterns of Asteraceae species richness on islands globally. Identify the hotspots of diversity on all island types, oceanic islands, and archipelagos. Explore the distribution of island species by tribe.
+
+Main steps (Outline):
+
+1.  Calculate diversity for each island unit
+    1.  Islands
+
+    2.  Archipelagos
+
+    3.  Save the datatables
+2.  Map the distribution of Asteraceae on islands and archipelagos
+3.  Identify the hotspots of diversity
+4.  Map the distribution of island species by tribe
+
+## Preparation
+
+Load libraries:
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(svglite)
+library(cowplot)
+library(patchwork)
+# Map packages
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(viridisLite)
+library(viridis)
+```
+
+Load data:
+
+Read in the environmental and island feature data associated with each entity_ID where there is atleast one Asteraceae species native to the island (`Asteraceae_island_env.xlsx`). This went through extensive preparation and cleaned up in 0_Data_preparation.Rmd.
+
+```{r}
+Asteraceae_island_env <- read_excel("../data/data_clean/Asteraceae_island_env.xlsx")
+```
+
+Read in the Asteraceae island checklists (`Asteraceae_islands_checklists.xlsx`) which have the GCD taxonomy (status, tribe, subfamily) integrated.
+
+```{r}
+Asteraceae_islands_checklists <- read_excel("../data/data_clean/Asteraceae_islands_checklists.xlsx", guess_max = 10000)
+```
+
+# Calculate diversity for each island unit
+
+Build a dataframe of islands with abiotic data and summary of diversity: total native species and total endemics.
+
+## Islands
+
+Summarize the data per GIFT island entity (entity_ID): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# convert NAs to 0
+Asteraceae_islands_checklists <- Asteraceae_islands_checklists %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per entity_ID
+native_endemic_counts <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  ungroup()
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_island_env_diversity_allunits <- Asteraceae_island_env %>%
+  left_join(native_endemic_counts, by = "entity_ID") %>%
+  relocate(c(Native_species, Endemic_species_list, Endemic_species_ref), .after = geo_entity)
+```
+
+Alternative code for reference below:
+
+```{r, eval = F}
+# Alternative code (Based on my original code)
+# Calculate the counts of unique native and endemic species per entity_ID
+island_native_species <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>%
+  distinct(work_species, .keep_all = T) %>% # first get all the unique species names (because there are repeats per geo_entity due to dif references) and keep all columns
+  add_count(name = "Native_species") %>% # add column that counts rows (now distinct species) per group 
+  slice(1) %>% # take only the top row
+  dplyr::select("entity_ID", "Native_species")  # keep only columns needed 
+
+island_endemic_list <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>%
+  filter(endemic_list >= 1) %>%
+  distinct(work_species, .keep_all = T) %>%
+  add_count(name = "Endemic_species_list") %>%
+  slice(1) %>%
+  dplyr::select("entity_ID", "Endemic_species_list") 
+
+# get a count of endemic ref
+island_endemic_ref <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>%
+  filter(endemic_ref >= 1) %>%
+  distinct(work_species, .keep_all = T) %>%
+  add_count(name = "Endemic_species_ref") %>%
+  slice(1) %>%
+  dplyr::select("entity_ID", "Endemic_species_ref") 
+
+# Combine to the island env table
+Asteraceae_island_env_diversity_B <- Asteraceae_island_env %>%
+  left_join(island_native_species, by = "entity_ID") %>%
+  relocate(Native_species, .after = geo_entity)
+
+Asteraceae_island_env_diversity_B <- Asteraceae_island_env_diversity_B %>%
+  left_join(island_endemic_list, by = "entity_ID") %>%
+  relocate(Endemic_species_list, .after = Native_species)
+
+Asteraceae_island_env_diversity_B <- Asteraceae_island_env_diversity_B %>%
+  left_join(island_endemic_ref, by = "entity_ID") %>%
+  relocate(Endemic_species_ref, .after = Endemic_species_list)
+```
+
+This is the full datatable (Asteraceae_island_env_diversity) we want to save below in `../Outputs/2_Diversity_patterns`. Depending on the downstream analysis we will use filtered versions of this table.
+
+The first filter we need to perform is to strictly islands. Using `entity_type` - variable manually created to more accurately identify true single islands - filter to "Island". More info in `0_data_preparation.Rmd`. For the mapping, include "Island_group_list" but do not include those for hotspot counts (and IB modeling downstream); this is because some islands are ONLY represented in GIFT as an archipelago and want to capture that in the map of distribution.
+
+```{r}
+# Filter to strictly only islands
+Asteraceae_island_env_diversity <- Asteraceae_island_env_diversity_allunits %>%
+  filter(entity_type != "Island_group" & entity_type != "Island_group_list" & entity_type != "Island_part") # filter out island groups and archipelago lists
+```
+
+```{r}
+# Filter to islands and archipelagos only represented as a group. This is just for mapping the distribution
+Asteraceae_island_env_diversity_map <- Asteraceae_island_env_diversity_allunits %>%
+  filter(entity_type != "Island_group"  & entity_type != "Island_part") 
+
+```
+
+Calculate percent endemism (ie endemics/native species) for the islands
+
+```{r}
+Asteraceae_island_env_diversity <- Asteraceae_island_env_diversity %>%
+  mutate(Percent_endemism = (Endemic_species_list / Native_species)*100) %>%
+  mutate(Percent_endemism = round(Percent_endemism, 1)) %>%
+  relocate(Percent_endemism, .after = Endemic_species_ref)
+```
+
+Compare diversity across oceanic islands.
+
+```{r}
+Asteraceae_island_env_diversity_oceanic <- Asteraceae_island_env_diversity %>%
+  filter(island_type == "oceanic")
+```
+
+## Archipelagos
+
+For the archipelago analysis we want to (A) plot the distribution and diversity of island species per archipelago, and (B) identify the most diverse archipelagos for native and endemic species. For this we need to build a new table the minimum following components:
+
+-   Archipelago entity name (`archipelago`)
+
+-   Count of native species (`Native_species`)
+
+-   Count of endemic species, list and ref (`Endemic_species_list` and `Endemic_species_ref`)
+
+-   Centroid Lat and Long for all the islands in the archipelago unit
+
+Summarize the diversity data per archipelago (archipelago): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# pull out the entity ids and associated archipelago classification
+archipelagos <- select(Asteraceae_island_env, c(entity_ID, archipelago))
+
+# join the archipelago classification to the checklists
+Asteraceae_arch_checklists <- left_join(Asteraceae_islands_checklists,
+            archipelagos,
+            by ="entity_ID")
+
+# convert NAs to 0. Very important for summarise to run correctly
+Asteraceae_arch_checklists <- Asteraceae_arch_checklists %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per archipelago
+arch_native_endemic_counts <- Asteraceae_arch_checklists %>%
+  group_by(archipelago) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  drop_na(archipelago) %>%
+  ungroup()
+
+# calculate centroid lat and long based on entity_IDs 
+archipelago_lat_lon <- Asteraceae_island_env %>%
+  group_by(archipelago) %>%
+  mutate(lon_arch = mean(longitude), lat_arch = mean(latitude)) %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "lon_arch", "lat_arch") # keep only columns needed
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_arch_diversity <- arch_native_endemic_counts %>%
+  left_join(archipelago_lat_lon, by = "archipelago") 
+```
+
+Alternative code base on the original version. For reference below.
+
+```{r, eval = FALSE}
+# pull out the entity ids and associated archipelago classification
+archipelagos <- select(Asteraceae_island_env, c(entity_ID, archipelago))
+
+# join the archipelago classification to the checklists
+Asteraceae_arch_checklists <- left_join(Asteraceae_islands_checklists,
+            archipelagos,
+            by ="entity_ID")
+
+# first get a count of total native species and set up dataframe
+archipelago_natives <- Asteraceae_arch_checklists %>%
+  group_by(archipelago) %>% # group by archipelago
+  distinct(work_species, .keep_all = T) %>% # first get all the unique species names (because there are repeats per geo_entity due to dif references) and keep all columns
+  add_count(name = "Native_species") %>% # add column that counts rows (now distinct species) per group (archipelago)
+  slice(1) %>% # take only the top row
+  dplyr::select("archipelago", "Native_species") %>% # keep only columns needed 
+  drop_na(archipelago)
+
+# get a count of endemic ref
+archipelago_endemic_ref <- Asteraceae_arch_checklists %>%
+  group_by(archipelago) %>%
+  filter(endemic_ref >= 1) %>%
+  distinct(work_species, .keep_all = T) %>%
+  add_count(name = "Endemic_species_ref") %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "Endemic_species_ref") %>% # keep only columns needed
+  drop_na(archipelago)
+
+# get a count of endemic list
+archipelago_endemic_list <- Asteraceae_arch_checklists %>%
+  group_by(archipelago) %>%
+  filter(endemic_list >= 1) %>%
+  distinct(work_species, .keep_all = T) %>%
+  add_count(name = "Endemic_species_list") %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "Endemic_species_list") %>% # keep only columns needed
+  drop_na(archipelago)
+
+# calculate centroid lat and long based on entity_IDs 
+archipelago_lat_lon <- Asteraceae_island_env %>%
+  group_by(archipelago) %>%
+  mutate(lon_arch = mean(longitude), lat_arch = mean(latitude)) %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "lon_arch", "lat_arch") # keep only columns needed
+
+# Combine the tables
+archipelago_diversity <- left_join(
+  archipelago_natives,
+  archipelago_endemic_ref,
+  by = "archipelago"
+)
+
+archipelago_diversity <- left_join(
+  archipelago_diversity,
+  archipelago_endemic_list,
+  by = "archipelago"
+)
+
+archipelago_diversity <- left_join(
+  archipelago_diversity,
+  archipelago_lat_lon,
+  by = "archipelago"
+)
+```
+
+Calculate percent endemism (ie endemics/native species) for the archipelagos
+
+```{r}
+Asteraceae_arch_diversity <- Asteraceae_arch_diversity %>%
+  mutate(Percent_endemism = (Endemic_species_list / Native_species)*100) %>%
+  mutate(Percent_endemism = round(Percent_endemism, 1)) %>%
+  relocate(Percent_endemism, .after = Endemic_species_ref)
+```
+
+## Save island env + diversity datatables
+
+Save the datatable of only strictly islands with environmental data and diversity. This will dataframe is used as input for the island biogeography models.
+
+```{r}
+write_xlsx(Asteraceae_island_env_diversity, "../data/data_clean/Asteraceae_island_env_diversity.xlsx")
+```
+
+# Map the distribution of Asteraceae on islands and archipelagos
+
+Set up the basemap aesthetics.
+
+```{r}
+# Setting up the basemap
+world <- ne_coastline(scale = "medium", returnclass = "sf")
+world_countries <- ne_countries(scale = "medium", returnclass = "sf")
+# Fixing polygons crossing dateline
+world <- st_wrap_dateline(world)
+world_countries <- st_wrap_dateline(world_countries)
+
+# Robinson projection
+Robinson <-
+  "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+
+# Background box
+xmin <- st_bbox(world)[["xmin"]]; xmax <- st_bbox(world)[["xmax"]]
+ymin <- st_bbox(world)[["ymin"]]; ymax <- st_bbox(world)[["ymax"]]
+bb <- sf::st_union(sf::st_make_grid(st_bbox(c(xmin = xmin,
+                                              xmax = xmax,
+                                              ymax = ymax,
+                                              ymin = ymin),
+                                            crs = st_crs(4326)),
+                                    n = 100))
+
+# Equator line
+equator <- st_linestring(matrix(c(-180, 0, 180, 0), ncol = 2, byrow = TRUE))
+equator <- st_sfc(equator, crs = st_crs(world))
+
+# Create linestrings for Tropic of Cancer and Tropic of Capricorn
+tropic_cancer <- st_linestring(matrix(c(-180, 23.5, 180, 23.5), ncol = 2, byrow = TRUE))
+tropic_capricorn <- st_linestring(matrix(c(-180, -23.5, 180, -23.5), ncol = 2, byrow = TRUE))
+# Assign the same CRS as the coastline data
+tropic_cancer <- st_sfc(tropic_cancer, crs = st_crs(world))
+tropic_capricorn <- st_sfc(tropic_capricorn, crs = st_crs(world))
+```
+
+Visualize the basemap and explore settings
+
+```{r}
+ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data= world, linewidth = 0.4) +
+  coord_sf(crs = Robinson) +
+  theme_bw()
+
+# first plot of bb to set base (oceans) white, and the second call of bb after world countries to be sure bounding box on top of coutnry lines
+# draw equator and tropics line, can play around with line width and color; note by plotting before world countries we set the lines underneath 
+# geom_sf(linewidth = 0.4) sets the width of world coast lines; between 0.2-0.5 likes best
+# change coord system with coord_sf
+```
+
+**Map the diversity of Asteraceae on islands.** Note that we filter out island parts and island groups, except where diversity is only represented by an archipelago (`island_group_list`) and no islands in GIFT.
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_island_env_diversity_sf <- st_as_sf(Asteraceae_island_env_diversity_map, 
+                                               coords = c("longitude", "latitude"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_island_env_diversity_sf <- st_transform(x = Asteraceae_island_env_diversity_sf , crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_island_env_diversity_sf$rob_long <- st_coordinates(Asteraceae_island_env_diversity_sf)[,1] 
+Asteraceae_island_env_diversity_sf$rob_lat <- st_coordinates(Asteraceae_island_env_diversity_sf)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_island_env_diversity_sf <- Asteraceae_island_env_diversity_sf %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_all <- c(1, 5, 15, 50, 150, 400)
+
+# manually change mixed system to continetal (just for mapping here)
+Asteraceae_island_env_diversity_sf$island_type[Asteraceae_island_env_diversity_sf$island_type == "mixed"] <- "continental"
+
+# Map diversity of Asteraceae on islands
+global_map_islands <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_island_env_diversity_sf,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list,
+                 shape = island_type),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", breaks = breaks_end_all, labels = breaks_end_all) +
+  scale_shape_manual(values = c(18, 19)) +
+  labs(size = "Native species", color = "Endemic species", shape = "Island type") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_islands
+```
+
+Save the map to outputs
+
+```{r}
+ggsave("../outputs/2_Diversity_patterns/Geographic_distribution_islands.png", global_map_islands, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/2_Diversity_patterns/Geographic_distribution_islands.svg", global_map_islands, width = 300, height = 180, units = "mm")
+```
+
+**Map the diversity of Asteraceae on archipelagos**
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_arch_diversity_sf <- st_as_sf(Asteraceae_arch_diversity, 
+                                               coords = c("lon_arch", "lat_arch"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_arch_diversity_sf <- st_transform(x = Asteraceae_arch_diversity_sf, crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_arch_diversity_sf$rob_long <- st_coordinates(Asteraceae_arch_diversity_sf)[,1] 
+Asteraceae_arch_diversity_sf$rob_lat <- st_coordinates(Asteraceae_arch_diversity_sf)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_arch_diversity_sf <- Asteraceae_arch_diversity_sf %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_arch <- c(1, 5, 15, 50, 150, 400)
+
+# Map diversity of Asteraceae on islands
+global_map_arch <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_arch_diversity_sf,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", option= "plasma", breaks = breaks_end_arch, labels = breaks_end_arch) + 
+  labs(size = "Native species", color = "Endemic species") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_arch
+
+```
+
+```{r}
+ggsave("../outputs/2_Diversity_patterns/Geographic_distribution_archipelagos.png", global_map_arch, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/2_Diversity_patterns/Geographic_distribution_archipelagos.svg", global_map_arch, width = 300, height = 180, units = "mm")
+```
+
+# Identify the hotspots of diversity
+
+```{r}
+Hotspots_islands_native <- Asteraceae_island_env_diversity %>%
+  ungroup() %>%
+  top_n(Native_species, n = 10) %>%
+  ggplot(aes(x = reorder(geo_entity, - Native_species), y = Native_species))+
+  geom_col(fill = "#003399")+
+  labs(title = "Native species", y = "Species richness") +
+  scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_text(size=18),
+        plot.title = element_text(size=22))
+Hotspots_islands_native
+
+Hotspots_islands_endemics <- Asteraceae_island_env_diversity %>%
+  ungroup() %>%
+  top_n(Endemic_species_list, n = 10) %>%
+  ggplot(aes(x = reorder(geo_entity, - Endemic_species_list), y = Endemic_species_list))+
+  geom_col(fill = "#009999")+
+  labs(title = "Endemic species", y = "Species richness") +
+  #scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size=22))
+Hotspots_islands_endemics 
+             
+# Remove British islands and Iceland from ranking
+Hotspots_islands_native_noApo <- Asteraceae_island_env_diversity %>%
+  filter(geo_entity != "Iceland") %>%
+  filter(geo_entity != "Ireland incl. North Ireland") %>%
+  ungroup() %>%
+  top_n(Native_species, n = 10) %>%
+  ggplot(aes(x = reorder(geo_entity, - Native_species), y = Native_species))+
+  geom_col(fill = "#003399")+
+  labs(title = "Native species (rm apo islands)") +
+  #scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_text(size=18),
+        plot.title = element_text(size=22))
+Hotspots_islands_native_noApo
+
+Hotspots_islands_endemics_noApo <- Asteraceae_island_env_diversity %>%
+  filter(geo_entity != "Iceland") %>%
+  ungroup() %>%
+  top_n(Endemic_species_list, n = 10) %>%
+  ggplot(aes(x = reorder(geo_entity, - Endemic_species_list), y = Endemic_species_list))+
+  geom_col(fill = "#009999")+
+  labs(title = "Endemic species (rm apo islands)") +
+  #scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size=22))
+Hotspots_islands_endemics_noApo 
+
+```
+
+```{r}
+Hotspots_islands <- (Hotspots_islands_native + Hotspots_islands_endemics) / (Hotspots_islands_native_noApo + Hotspots_islands_endemics_noApo)
+Hotspots_islands
+```
+
+```{r}
+ggsave("../outputs/2_Diversity_patterns/Hotspots_islands_comparison.png", Hotspots_islands, width = 300, height = 300, units = "mm")
+```
+
+Archipelagos
+
+```{r}
+Hotspots_arch_native <- Asteraceae_arch_diversity %>%
+  ungroup() %>%
+  top_n(Native_species, n = 10) %>%
+  ggplot(aes(x = reorder(archipelago, - Native_species), y = Native_species))+
+  geom_col(fill = "#CC0033")+
+  labs(title = "Native species", y = "Species richness") +
+  scale_x_discrete(labels= c("Aegean and Southern Greece Islands" = "Greek Islands")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_text(size=18),
+        plot.title = element_text(size=22))
+Hotspots_arch_native
+
+Hotspots_arch_endemics <- Asteraceae_arch_diversity %>%
+  ungroup() %>%
+  top_n(Endemic_species_list, n = 10) %>%
+  ggplot(aes(x = reorder(archipelago, - Endemic_species_list), y = Endemic_species_list))+
+  geom_col(fill = "#FF9933")+
+  labs(title = "Endemic species", y = "Species richness") +
+  #scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size=22))
+Hotspots_arch_endemics 
+             
+# Remove British islands and Iceland from ranking
+Hotspots_arch_native_noApo <- Asteraceae_arch_diversity %>%
+  filter(archipelago != "British Isles") %>%
+  filter(archipelago != "Iceland") %>%
+  ungroup() %>%
+  top_n(Native_species, n = 10) %>%
+  ggplot(aes(x = reorder(archipelago, - Native_species), y = Native_species))+
+  geom_col(fill = "#CC0033")+
+  labs(title = "Native species (rm apo islands)") +
+  scale_x_discrete(labels= c("Aegean and Southern Greece Islands" = "Greek Islands")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_text(size=18),
+        plot.title = element_text(size=22))
+Hotspots_arch_native_noApo
+
+Hotspots_arch_endemics_noApo <- Asteraceae_arch_diversity %>%
+  filter(archipelago != "British Isles") %>%
+  filter(archipelago != "Iceland") %>%
+  ungroup() %>%
+  top_n(Endemic_species_list, n = 10) %>%
+  ggplot(aes(x = reorder(archipelago, - Endemic_species_list), y = Endemic_species_list))+
+  geom_col(fill = "#FF9933")+
+  labs(title = "Endemic species (rm apo islands)") +
+  #scale_x_discrete(labels= c("Ireland incl. North Ireland" = "Ireland")) + # use this to change any archipelago lables
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14),
+        axis.title.x = element_blank(), 
+        axis.text.y = element_text(size=14),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size=22))
+Hotspots_arch_endemics_noApo
+```
+
+```{r}
+Hotspots_archipelagos <- (Hotspots_arch_native + Hotspots_arch_endemics) / (Hotspots_arch_native_noApo + Hotspots_arch_endemics_noApo)
+Hotspots_archipelagos
+```
+
+```{r}
+ggsave("../outputs/2_Diversity_patterns/Hotspots_archs_comparison.png", Hotspots_archipelagos, width = 300, height = 300, units = "mm")
+```
+
+# Map the distribution of island species by tribe
+
+```{r}
+# tribe
+tribe_map_data <- tribe_map_data %>%
+mutate(tribe = factor(tribe, levels = c("Barnadesieae", "Famatinantheae", "Stifftieae", "Hyalideae", "Mutisieae", "Nassauvieae", "Onoserideae", "Gochnatieae", "Wunderlichieae", "Hecastocleideae", "Pertyeae", "Tarchonantheae", "Oldenburgieae", "Dicomeae", "Cardueae", "Gymnarrheneae", "Vernonieae", "Liabeae", "Arctotideae", "Platycarpheae", "Moquinieae", "Eremothamneae", "Cichorieae", "Corymbieae", "Astereae", "Senecioneae", "Gnaphalieae", "Anthemideae", "Eupatorieae", "Heliantheae", "Inuleae", "Coreopsideae", "Madieae", "Tageteae", "Millerieae", "Athroismeae", "Neurolaeneae", "Calenduleae", "Perityleae", "Helenieae", "Bahieae", "Doroniceae", "Chaenactideae", "Polymnieae", "Feddeeae")))
+
+# subfamily
+tribe_map_data <- tribe_map_data %>%
+mutate(subfamily = factor(subfamily, levels =c("Barnadesioideae", "Famatinanthoideae", "Stifftioideae", "Mutisioideae", "Gochnatioideae", "Wunderlichioideae", "Hecastocleidoideae", "Pertyoideae", "Tarchonanthoideae", "Dicomoideae", "Carduoideae", "Gymnarrhenoideae", "Vernonioideae", "Cichorioideae", "Corymbioideae", "Asteroideae")))
+```
+
+Create dataframe that has the island species and taxonomy (tribe, subfamily) joined with the lat and longitude of the island where the species occurs.
+
+```{r}
+# Remove all the species duplicates (due to multiple references per entity, etc) in each GIFT geoentity, so we have all the unique species native to each geoentity
+tribe_map_data <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>% # group by island
+  distinct(work_species, .keep_all = T) %>% # distinct species and keep all columns
+  select(c("entity_ID", "work_species", "Tribe", "Subfamily")) 
+
+# Join the species+taxonony data to geographic coordinates (for all insular units in GIFT)
+tribe_map_data <- select(Asteraceae_island_env_diversity_allunits, c(entity_ID, longitude, latitude)) %>%
+  left_join(
+  tribe_map_data, 
+  Asteraceae_island_env_diversity_allunits,
+  by = "entity_ID"
+)
+```
+
+```{r}
+# define th colors for the subfamilies (matching phylogeny figure)
+subfamily_colors <- c(Stifftioideae = "#9E1F63", Mutisioideae = "#BE202E", Gochnatioideae ="#EF4136", Pertyoideae = "#FBB267", Tarchonanthoideae = "#FFD10A", Dicomoideae = "#D7DF23", Carduoideae = "#8EC641", Vernonioideae = "#47A373", Cichorioideae = "#0A828B", Asteroideae = "#21409A")
+
+# Create factor order for mapping
+tribe_map_data <- tribe_map_data %>%
+mutate(Subfamily = factor(Subfamily, levels =c("Barnadesioideae", "Famatinanthoideae", "Stifftioideae", "Mutisioideae", "Gochnatioideae", "Wunderlichioideae", "Hecastocleidoideae", "Pertyoideae", "Tarchonanthoideae", "Dicomoideae", "Carduoideae", "Gymnarrhenoideae", "Vernonioideae", "Cichorioideae", "Corymbioideae", "Asteroideae")))
+
+# Create factors for the tribes with island species. first by phylo order, then ascending number of species within each tribe
+tribe_map_data$Tribe <- factor(tribe_map_data$Tribe, levels = c("Stifftieae", "Nassauvieae", "Mutisieae", "Gochnatieae", "Pertyeae", "Tarchonantheae", "Dicomeae", "Cardueae", "Arctotideae", "Liabeae", "Distephaneae", "Vernonieae", "Cichorieae", "Chaenactideae","Feddeeae", "Bahieae", "Helenieae", "Doroniceae", "Perityleae", "Calenduleae", "Neurolaeneae", "Athroismeae", "Millerieae", "Tageteae", "Madieae", "Coreopsideae", "Inuleae", "Heliantheae", "Eupatorieae", "Anthemideae", "Gnaphalieae", "Senecioneae", "Astereae"))
+
+```
+
+```{r}
+# convert to SF object and make lat long column spatial
+tribe_map_data_sf <- st_as_sf(tribe_map_data, 
+                              coords = c("longitude", "latitude"),
+                              crs = 4326)
+
+# convert lat+long to Robinson projection
+tribe_map_data_sf <- st_transform(x = tribe_map_data_sf , crs = Robinson)
+
+# get coordinates and add back to dataframe
+tribe_map_data_sf$rob_long <- st_coordinates(tribe_map_data_sf)[,1] 
+tribe_map_data_sf$rob_lat <- st_coordinates(tribe_map_data_sf)[,2] 
+
+# Map diversity of tribes across islands
+global_map_tribes <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "lightgrey", color = "lightgrey")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.1, color = "darkgrey") +
+  geom_point(data = tribe_map_data_sf,
+             aes(x = rob_long, y = rob_lat,
+                 color = Subfamily),
+             alpha = 0.9,
+             size = 1) +
+  scale_color_manual(values = subfamily_colors) +
+  facet_wrap(~Tribe,  ncol = 5) +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    strip.text = element_text(face = "bold"),
+    strip.background = element_blank(),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_tribes
+
+```
+
+```{r}
+ggsave("../outputs/2_Diversity_patterns/Tribe_geographic_distribution.svg", global_map_tribes, width = 300, height = 200, units = "mm")
+```

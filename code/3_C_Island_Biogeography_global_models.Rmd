@@ -1,0 +1,1046 @@
+---
+title: 'Island biogeography patterns: Global model'
+output: html_document
+date: "2023-10-05"
+---
+
+# Overview
+
+The goal of the island biogeography section is to explore island biogeographic patterns and physical drivers of insular Asteraceae diversity and address these main question: What island features and environmental variables are linked to (1) native species richness and (2) proportion of single island endemics for insular Asteraceae.
+
+The two previous scripts (3_A) carried out an initial data explorations and (3_B) built up candidate models with increasing complexity and compared models to select the best global model based on AIC score. This script will perform the following: fit the global model for native species richness (NSR) and proportion of single island endemics (pSIE), carry out model validation and assesment for both global models, and plot the results.
+
+Main steps (Outline):
+
+1.  Fit the global model
+    1.  Native species richness (NSR)
+
+    2.  Proportion of single island endemics (pSIE)
+
+    3.  Island age subset model
+2.  Model validation: performance and accuracy
+    1.  Native species richness (NSR)
+
+    2.  Proportion of single island endemics (pSIE)
+
+    3.  Island age subset model
+3.  Results: model summary and visualization
+    1.  Model summary table
+
+    2.  Standardized coefficients
+
+    3.  Marginal effects (predictions)
+
+## Preparation
+
+Load libraries:
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(svglite)
+library(cowplot)
+
+# modeling packages
+library(easystats)
+library(GGally)
+library(lme4) 
+library(glmmTMB)
+library(DHARMa)
+library(sjPlot)
+library(ggeffects)
+```
+
+Load data:
+
+`Asteraceae_island_env_diversity.xlsx` is a cleaned dataset that has all the strictly island units in GIFT3 with island feature data and a summary of their diversity (natives and endemics). This dataset started with the extraction and cleaning in 0_data_preparation.Rmd, and then diversity per geographic unit calculated in `2_A_Geographic_diversity.Rmd`. Note: `entity_type` has been manually created to filter to true islands, and `Asteraceae_island_env_diversity.xlsx` has filtered out all island groups and island parts.
+
+```{r}
+island_env_diversity <- read_xlsx("../data/data_clean/Asteraceae_island_env_diversity.xlsx")
+```
+
+Calculate proportion endemism
+
+```{r}
+island_env_diversity$pSIE <- island_env_diversity$Endemic_species_list/island_env_diversity$Native_species
+```
+
+Simplify the climatic variable names:
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio1 = "mean_CHELSA_bio1_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio12 = "mean_CHELSA_bio12_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio4 = "mean_CHELSA_bio4_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio15 = "mean_CHELSA_bio15_1981-2010_V.2.1")
+```
+
+Filter out islands that are below 1km2. Following approach in Taylor (2020) and discussion with PW (Aug 2022) - GIFT data has a bias for checklists of small islands due to previous research in the lab and islands smaller than 1km2 not accurately represented by the scale of the environmental data.
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  filter(area >= 1)
+```
+
+This reduces the dataset from 791 islands to 514 islands.
+
+For the age subset model: Filter to islands that are oceanic and have an age estimate
+
+```{r}
+island_env_diversity_age <- island_env_diversity %>%
+  filter(island_type == "oceanic") %>%
+  drop_na(age_Ma)
+```
+
+223 oceanic islands with age estimates.
+
+Transform skewed predictor variables, according to data exploration in `3_A_Island_biogeography_data_exploration.Rmd`. Skewed variables are log10 transformed, and variables that have 0 in range are log10+1 transformed.
+
+```{r}
+# area
+island_env_diversity$area_log <- log10(island_env_diversity$area)
+
+# distance
+island_env_diversity$dist_log <- log10(island_env_diversity$dist +1)
+
+# SLMP
+island_env_diversity$SLMP_log <- log10(island_env_diversity$SLMP)
+
+# mean elevation
+island_env_diversity$mean_mn30_grd_log <- log10(island_env_diversity$mean_mn30_grd +1)
+
+# max elevation
+island_env_diversity$max_mx30_grd_log <- log10(island_env_diversity$max_mx30_grd +1)
+
+# terrain ruggedness 
+island_env_diversity$mean_mn30_grd_TRI_log <- log10(island_env_diversity$mean_mn30_grd_TRI +1)
+
+# precipitation
+island_env_diversity$mean_CHELSA_bio12_log <- log10(island_env_diversity$mean_CHELSA_bio12)
+
+# temperature seasonality 
+island_env_diversity$mean_CHELSA_bio4_log <- log10(island_env_diversity$mean_CHELSA_bio4)
+
+# precipitation seasonality 
+island_env_diversity$mean_CHELSA_bio15_log <- log10(island_env_diversity$mean_CHELSA_bio15)
+```
+
+Transform the skewed predictor variables for age
+
+```{r}
+# area
+island_env_diversity_age$area_log <- log10(island_env_diversity_age$area)
+
+# distance
+island_env_diversity_age$dist_log <- log10(island_env_diversity_age$dist +1)
+
+# SLMP
+island_env_diversity_age$SLMP_log <- log10(island_env_diversity_age$SLMP)
+
+# mean elevation
+island_env_diversity_age$mean_mn30_grd_log <- log10(island_env_diversity_age$mean_mn30_grd +1)
+
+# max elevation
+island_env_diversity_age$max_mx30_grd_log <- log10(island_env_diversity_age$max_mx30_grd +1)
+
+# terrain ruggedness 
+island_env_diversity_age$mean_mn30_grd_TRI_log <- log10(island_env_diversity_age$mean_mn30_grd_TRI +1)
+
+# precipitation
+island_env_diversity_age$mean_CHELSA_bio12_log <- log10(island_env_diversity_age$mean_CHELSA_bio12)
+
+# temperature seasonality 
+island_env_diversity_age$mean_CHELSA_bio4_log <- log10(island_env_diversity_age$mean_CHELSA_bio4)
+
+# precipitation seasonality 
+island_env_diversity_age$mean_CHELSA_bio15_log <- log10(island_env_diversity_age$mean_CHELSA_bio15)
+```
+
+Scale and center the predictor variables.
+
+```{r}
+predictor = c("area_log", "dist_log",	"SLMP_log", "mean_mn30_grd_log",	"max_mx30_grd_log",	"mean_mn30_grd_TRI_log", "mean_CHELSA_bio1",	"mean_CHELSA_bio12_log",	"mean_CHELSA_bio4_log",
+              "mean_CHELSA_bio15_log")
+island_env_diversity[,predictor] = scale(island_env_diversity[,predictor], center = TRUE, scale = TRUE)
+```
+
+Scale and center the predictors for the age subset model
+
+```{r}
+predictor = c("area_log", "dist_log",	"SLMP_log", "mean_mn30_grd_log",	"max_mx30_grd_log",	"mean_mn30_grd_TRI_log", "mean_CHELSA_bio1",	"mean_CHELSA_bio12_log",	"mean_CHELSA_bio4_log",
+              "mean_CHELSA_bio15_log", "age_Ma")
+island_env_diversity_age[,predictor] = scale(island_env_diversity_age[,predictor], center = TRUE, scale = TRUE)
+```
+
+Convert SLMP to a more intuitive measure of isolation: multiple by -1.
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  mutate(SLMP_log = SLMP_log*(-1))
+```
+
+```{r}
+island_env_diversity_age <- island_env_diversity_age %>%
+  mutate(SLMP_log = SLMP_log*(-1))
+```
+
+# Fit the global model
+
+## Native species richness (NSR)
+
+Response:
+
+-   Native species richness
+
+Predictor variables:
+
+-   Area (log10 and scaled/centered)
+
+-   SLMP (log10 and scaled/centered) \* (-1)
+
+-   Island type; ie oceanic or continental
+
+-   Max elevation (log10+1 and scaled/centered)
+
+-   Temperature seasonality (log10 and scaled/centered)
+
+Random effect:
+
+-   Archipelago; with random intercept and fixed mean
+
+Error distribution: negative binomial
+
+```{r}
+m_nsr <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = nbinom2,
+              data = island_env_diversity)
+summary(m_nsr)
+```
+
+## Proportion of single island endemics (pSIE)
+
+Response:
+
+-   Proportion of single island endemics
+
+Predictor variables:
+
+-   Area (log10 and scaled/centered)
+
+-   SLMP (log10 and scaled/centered) \* (-1)
+
+-   Island type; ie oceanic or continental
+
+-   Max elevation (log10+1 and scaled/centered)
+
+-   Mean annual temperature (scaled/centered)
+
+Random effect:
+
+-   Archipelago; with random intercept and fixed mean
+
+Error distribution: beta binomial with total species weights
+
+```{r}
+m_pSIE <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = island_env_diversity)
+summary(m_pSIE)
+```
+
+## Island age subset model
+
+Following Whittaker (2008) GDM prediction that biodiversity on islands follows a hump shaped (unimodal) relationsip with island area, we include a quadratic term for age (age+age\^2) on oceanic islands where we have an accurate age estimate. Additionally, several studies (Lenzner 2017, Steinbauer 2013, Fattorini 2009) have shown that a refined approach to the GDM by log transforming age (ie speices richness \~ log(area) + log(age) + log(age)\^2) capture island dynamics better, especially for Asteraceae (Lenzner 2017). However, after internal discussions (R.E. and K.v.B) we decided to not log transform age.
+
+simple GDM model: native species richness \~ log(area) + (Age) + (Age)\^2
+
+```{r}
+m_nsr_age_simple <- glmmTMB(Native_species ~
+                        area_log + age_Ma + I(age_Ma^2) + (1|archipelago),
+                      family = nbinom2,
+                      data = island_env_diversity_age)
+summary(m_nsr_age_simple)
+```
+
+simple GDM model: pSIE \~ log(area) + (Age) + (Age)\^2
+
+```{r}
+m_pSIE_age_simple <- glmmTMB(pSIE ~
+                        area_log + age_Ma + I(age_Ma^2) + (1|archipelago),
+                        family = betabinomial(link = "logit"),
+                        weights= Native_species,
+                      data = island_env_diversity_age)
+summary(m_pSIE_age_simple)
+```
+
+Global model with age.
+
+Note: This is best global mode with age+age\^2 as additional predictors. Island type (oceanic, continental) is not included as a predictor since this subset of the data is filtered to oceanic islands with a age estimate.
+
+Native species richness (NSR)
+
+```{r}
+m_nsr_age <- glmmTMB(Native_species ~
+                       area_log + SLMP_log + max_mx30_grd_log + mean_CHELSA_bio4_log + age_Ma + I(age_Ma^2) + (1|archipelago),
+                      family = nbinom2,
+                      data = island_env_diversity_age)
+summary(m_nsr_age)
+```
+
+Proportion of single island endemics (pSIE)
+
+```{r}
+m_pSIE_age <- glmmTMB(pSIE ~
+                        area_log + SLMP_log + max_mx30_grd_log + mean_CHELSA_bio1 + age_Ma + I(age_Ma^2) + (1|archipelago),
+                        family = betabinomial(link = "logit"),
+                        weights= Native_species,
+                      data = island_env_diversity_age)
+summary(m_pSIE_age)
+```
+
+# Model validation: performance and accuracy
+
+## Native species richness (NSR)
+
+**Model performance summary**
+
+```{r}
+model_performance(m_nsr)
+```
+
+**Collinearity among predictors**
+
+Calculate the VIF for each predictor variable in the model.
+
+```{r}
+check_model(m_nsr, check = "vif")
+```
+
+**Overdispersion**
+
+```{r}
+check_overdispersion(m_nsr)
+```
+
+**Zero inflation**
+
+```{r}
+check_zeroinflation(m_nsr)
+```
+
+**Visualization of model assumptions**
+
+```{r}
+check_model(m_nsr)
+
+```
+
+**Inspect residuals with DHARMa**
+
+Following DHARMa package: <https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html>
+
+```{r}
+# calculate residuals
+simulationOutput_nsr <- simulateResiduals(fittedModel = m_nsr)
+simulationOutput_nsr_2 <- simulateResiduals(fittedModel = m_nsr, plot = F, refit = T)
+```
+
+```{r}
+# plot residuals
+plot(simulationOutput_nsr)
+plot(simulationOutput_nsr_2)
+```
+
+```{r}
+testOutliers(simulationOutput_nsr)
+outliers(simulationOutput_nsr, return = "index")
+```
+
+Test dispersion with DHARMa
+
+```{r}
+testDispersion(simulationOutput_nsr)
+```
+
+## Proportion of single island endemics (pSIE)
+
+**Model performance summary**
+
+```{r}
+model_performance(m_pSIE)
+```
+
+**Collinearity among predictors**
+
+Calculate the VIF for each predictor variable in the model.
+
+```{r}
+check_model(m_pSIE, check = "vif")
+```
+
+**Overdispersion**
+
+```{r}
+check_overdispersion(m_pSIE)
+```
+
+But see DHARMa diagnostic below.
+
+**Visualization of model assumptions**
+
+```{r}
+check_model(m_pSIE)
+```
+
+**Inspect residuals**
+
+Following DHARMa package: <https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html>
+
+```{r}
+# calculate residuals
+simulationOutput_pSIE <- simulateResiduals(fittedModel = m_pSIE, plot = F) 
+simulationOutput_pSIE_2 <- simulateResiduals(fittedModel = m_pSIE, plot = F) 
+```
+
+```{r}
+# plot residuals
+plot(simulationOutput_pSIE) 
+```
+
+```{r}
+testOutliers(simulationOutput_pSIE, type = 'bootstrap') 
+```
+
+Test dispersion with DHARMa
+
+```{r}
+testDispersion(simulationOutput_pSIE) 
+```
+
+Test for zero inflation with DHARMa
+
+```{r}
+testZeroInflation(simulationOutput_pSIE) 
+```
+
+### Save DHARMa outputs
+
+```{r}
+pdf('../outputs/3_Island_biogeography_models/DHARMa_nsr.pdf', 
+    width = 8,
+    height = 4) 
+plot(simulationOutput_nsr)
+dev.off()
+
+pdf('../outputs/3_Island_biogeography_models/DHARMa_pSIE.pdf', 
+    width = 8,
+    height = 4)
+plot(simulationOutput_pSIE)
+dev.off()
+```
+
+## Island age subset model
+
+**Model performance summary**
+
+```{r}
+model_performance(m_nsr_age) 
+model_performance(m_pSIE_age) 
+```
+
+**Collinearity among predictors**
+
+Calculate the VIF for each predictor variable in the model.
+
+```{r}
+check_model(m_nsr_age, check = "vif") 
+check_model(m_pSIE_age, check = "vif") 
+```
+
+**Overdispersion**
+
+```{r}
+check_overdispersion(m_nsr_age)
+check_overdispersion(m_pSIE_age)
+```
+
+**Visualization of model assumptions**
+
+```{r}
+check_model(m_nsr_age) 
+check_model(m_pSIE_age) 
+```
+
+**Inspect residuals**
+
+Following DHARMa package: <https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html>
+
+```{r}
+# calculate residuals
+simulationOutput_nsr_age <- simulateResiduals(fittedModel = m_nsr_age, plot = F) 
+simulationOutput_pSIE_age <- simulateResiduals(fittedModel = m_pSIE_age, plot = F) 
+```
+
+```{r}
+# plot residuals
+plot(simulationOutput_nsr_age) 
+plot(simulationOutput_pSIE_age) 
+```
+
+Test for outliers with DHARMa
+
+```{r}
+testOutliers(simulationOutput_nsr_age, type = 'bootstrap') 
+testOutliers(simulationOutput_pSIE_age, type = 'bootstrap') 
+```
+
+Test dispersion with DHARMa
+
+```{r}
+testDispersion(simulationOutput_nsr_age) 
+testDispersion(simulationOutput_pSIE_age) 
+```
+
+Test for zero inflation with DHARMa
+
+```{r}
+testZeroInflation(simulationOutput_nsr_age) 
+testZeroInflation(simulationOutput_pSIE_age) 
+```
+
+# Results: model summary and visualization
+
+## Full model for native species richness (NSR) and proportion endemism (pSIE)
+
+### Summary table
+
+Summary table with sjPlots. Package details here: <https://strengejacke.github.io/sjPlot/articles/tab_mixed.html>
+
+Native species richness (NSR).
+
+```{r}
+summary(m_nsr) 
+tab_model(m_nsr, transform = NULL) 
+```
+
+Proportion of single island endemics (pSIE)
+
+```{r}
+summary(m_pSIE) 
+tab_model(m_pSIE, transform = NULL) 
+```
+
+Combine into one summary table.
+
+```{r}
+pl <- c(
+  `(Intercept)` = "Intercept",
+  area_log = "Area",
+  SLMP_log = "Isolation", 
+  island_typeoceanic = "Island type [oceanic]", 
+  max_mx30_grd_log = "Max elevation",
+  mean_CHELSA_bio4_log = "Temperature seasonality",
+  mean_CHELSA_bio1 = "Annual temperature"
+) 
+
+model_table <- tab_model(m_nsr, m_pSIE, transform = NULL,
+        dv.labels = c("Native species richness (NSR)", "Proportion endemism (pSIE)"),
+         pred.labels = pl) 
+model_table
+```
+
+```{r, eval=FALSE}
+# to save as an html and later convert to pdf and png
+model_table <- tab_model(m_nsr, m_pSIE, transform = NULL,
+        dv.labels = c("Native species richness (NSR)", "Proportion endemism (pSIE)"),
+         pred.labels = pl,
+        file = "../outputs/3_Island_biogeography_models/model_summary_table.html")
+model_table
+```
+
+### Standardized coefficients
+
+Plotting Estimates (Fixed Effects) of Regression Models.
+
+Plot the coefficients with sjPlots. Package documentation here: <https://strengejacke.github.io/sjPlot/articles/plot_model_estimates.html#plotting-estimates-of-generalized-linear-models>
+
+```{r}
+# set the them to bw
+set_theme(base = theme_bw())
+
+# Native species richness model
+plot_NSR <- plot_models(m_nsr, transform = NULL, 
+            vline.color = "dark grey",
+#           title = "Native species richness",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "island_typeoceanic" = "Island type [oceanic]", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio4_log" = "Temperature seasonality"),
+            axis.title = "Standardized coefficient",
+            colors = "#003399",
+            show.legend = F) +
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12))
+plot_NSR
+
+# pSIE model
+plot_pSIE <- plot_models(m_pSIE, transform = NULL, 
+            vline.color = "dark grey",
+#           title = "Proportion endemism (pSIE)",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "island_typeoceanic" = "Island type [oceanic]", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio1" = "Annual temperature"),
+            axis.title = "Standardized coefficient",
+            colors = "#009999",
+            show.legend = F) +
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12))
+plot_pSIE
+```
+
+Combine into one plot
+
+```{r}
+coefficient_plot <- cowplot::plot_grid(plot_NSR, plot_pSIE, labels = c('A', 'B'), align = "v")
+coefficient_plot
+```
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/coefficient_plots.png", coefficient_plot, height=3, width=9, units="in")
+
+ggsave("../outputs/3_Island_biogeography_models/coefficient_plots.svg", coefficient_plot, height=3, width=9, units="in") 
+```
+
+### Marginal effects (predictions)
+
+Plot the marginal effects with ggeffects package: <https://strengejacke.github.io/ggeffects/>
+
+Background articles I found helpful: <https://www.andrewheiss.com/blog/2022/05/20/marginalia/#marginaleffectss-and-emmeanss-philosophies-of-averaging> and <https://www.andrewheiss.com/blog/2022/11/29/conditional-marginal-marginaleffects/>
+
+Prediction plots for native species richness and proportion endemism. Note: only the significant variables are plotted; plotted with raw data points; point color matches the coefficients plot.
+
+```{r}
+# NSR
+prediction_nsr_area <- ggpredict(m_nsr, terms = "area_log [all]") 
+plot_prediction_nsr_area <- plot(prediction_nsr_area) + 
+  geom_point(data = island_env_diversity, aes(x=area_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Area (km2)", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+prediction_nsr_SLMP <- ggpredict(m_nsr, terms = "SLMP_log [all]")
+plot_prediction_nsr_SLMP <- plot(prediction_nsr_SLMP) + 
+  geom_point(data = island_env_diversity, aes(x=SLMP_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Isolation (-SLMP)", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+prediction_nsr_itype <- ggpredict(m_nsr, terms = "island_type [all]")
+plot_prediction_nsr_itype <- plot(prediction_nsr_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+prediction_nsr_maxelev <- ggpredict(m_nsr, terms = "max_mx30_grd_log [all]")
+plot_prediction_nsr_maxelev <- plot(prediction_nsr_maxelev) +
+  geom_point(data = island_env_diversity, aes(x=max_mx30_grd_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Max elevation (m)", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+prediction_nsr_seasonality <- ggpredict(m_nsr, terms = "mean_CHELSA_bio4_log [all]")
+plot_prediction_nsr_seasonality <- plot(prediction_nsr_seasonality) +
+  geom_point(data = island_env_diversity, aes(x=mean_CHELSA_bio4_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Temperature seasonality (°C)", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# pSIE
+prediction_pSIE_area <- ggpredict(m_pSIE, terms = "area_log [all]")
+plot_prediction_pSIE_area <- plot(prediction_pSIE_area) +
+  geom_point(data = island_env_diversity, aes(x=area_log, y=pSIE), alpha = 0.3, color = "#009999") +
+  labs(x = "Area (km2) ", y = "Proportion endemism (pSIE)", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+prediction_pSIE_SLMP <- ggpredict(m_pSIE, terms = "SLMP_log [all]")
+plot_prediction_pSIE_SLMP <- plot(prediction_pSIE_SLMP) +
+  geom_point(data = island_env_diversity, aes(x=SLMP_log, y=pSIE), alpha = 0.3, color = "#009999") +
+  labs(x = "Isolation (-SLMP)", y = "Proportion endemism (pSIE)", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+prediction_pSIE_itype <- ggpredict(m_pSIE, terms = "island_type [all]")
+plot_prediction_pSIE_itype <- plot(prediction_pSIE_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=pSIE), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", y = "Proportion endemism (pSIE)", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# Combine
+predictions_ggeffects_nsr_pSIE <- cowplot::plot_grid(plot_prediction_nsr_area, plot_prediction_nsr_SLMP, plot_prediction_nsr_itype, plot_prediction_nsr_maxelev, plot_prediction_nsr_seasonality, NULL, plot_prediction_pSIE_area, plot_prediction_pSIE_SLMP, plot_prediction_pSIE_itype)
+
+predictions_ggeffects_nsr_pSIE
+```
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables.svg", predictions_ggeffects_nsr_pSIE, width = 200, height = 170, units = "mm")
+
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables.png", predictions_ggeffects_nsr_pSIE, width = 200, height = 170, units = "mm")
+```
+
+Plot the marginal effects with ggeffect on the log-scale
+
+```{r}
+# Test with area
+prediction_nsr_area <- ggpredict(m_nsr, terms = "area_log [all]")
+plot_prediction_nsr_area_log <- plot(prediction_nsr_area) + 
+  geom_point(data = island_env_diversity, 
+             aes(x=area_log , y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -1:3, labels = 10^(-1:3)) +
+  labs(x = "Area (km2)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) 
+plot_prediction_nsr_area_log
+```
+
+```{r}
+# NSR
+prediction_nsr_area <- ggpredict(m_nsr, terms = "area_log [all]")
+plot_prediction_nsr_area_log <- plot(prediction_nsr_area) + 
+  geom_point(data = island_env_diversity, 
+             aes(x=area_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -1:3, labels = 10^(-1:3)) +
+  labs(x = "Area (km2)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_area_log
+
+prediction_nsr_SLMP <- ggpredict(m_nsr, terms = "SLMP_log [all]")
+plot_prediction_nsr_SLMP_log <- plot(prediction_nsr_SLMP) + 
+  geom_point(data = island_env_diversity, 
+             aes(x=SLMP_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -2:3, labels = 10^(-2:3)) +
+  labs(x = "Isolation (-SLMP)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_SLMP_log
+# note 4 islands do not have SLMP and so will not be plotted with geom_point()
+
+prediction_nsr_itype <- ggpredict(m_nsr, terms = "island_type [all]")
+plot_prediction_nsr_itype <- plot(prediction_nsr_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_itype
+
+prediction_nsr_maxelev <- ggpredict(m_nsr, terms = "max_mx30_grd_log [all]")
+plot_prediction_nsr_maxelev_log <- plot(prediction_nsr_maxelev) +
+  geom_point(data = island_env_diversity, 
+             aes(x=max_mx30_grd_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -3:2, labels = 10^(-3:2)) +
+  labs(x = "Max elevation (m)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_maxelev_log
+
+prediction_nsr_seasonality <- ggpredict(m_nsr, terms = "mean_CHELSA_bio4_log [all]")
+plot_prediction_nsr_seasonality_log <- plot(prediction_nsr_seasonality) +
+  geom_point(data = island_env_diversity, 
+             aes(x=mean_CHELSA_bio4_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -3:2, labels = 10^(-3:2)) +
+  labs(x = "Temperature seasonality (°C)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_seasonality_log
+
+# pSIE
+prediction_pSIE_area <- ggpredict(m_pSIE, terms = "area_log [all]")
+plot_prediction_pSIE_area_log <- plot(prediction_pSIE_area) +
+  geom_point(data = island_env_diversity, 
+             aes(x=area_log, y=pSIE), 
+             alpha = 0.3, 
+             color = "#009999") +
+  scale_x_continuous(breaks = -1:3, labels = 10^(-1:3)) +
+  labs(x = "Area (km2)", 
+       y = "Proportion endemism (pSIE)", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_area_log
+
+prediction_pSIE_SLMP <- ggpredict(m_pSIE, terms = "SLMP_log [all]")
+plot_prediction_pSIE_SLMP_log <- plot(prediction_pSIE_SLMP) +
+  geom_point(data = island_env_diversity, 
+             aes(x=SLMP_log, y=pSIE), 
+             alpha = 0.3, color = "#009999") +
+  scale_x_continuous(breaks = -2:3, labels = 10^(-2:3)) +
+  labs(x = "Isolation (-SLMP)", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_SLMP_log
+
+prediction_pSIE_itype <- ggpredict(m_pSIE, terms = "island_type [all]")
+plot_prediction_pSIE_itype <- plot(prediction_pSIE_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=pSIE), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot_prediction_pSIE_itype
+
+# Combine
+predictions_ggeffects_nsr_pSIE_log <- cowplot::plot_grid(plot_prediction_nsr_area_log, plot_prediction_nsr_SLMP_log, plot_prediction_nsr_itype, plot_prediction_nsr_maxelev_log, plot_prediction_nsr_seasonality_log, NULL, plot_prediction_pSIE_area_log, plot_prediction_pSIE_SLMP_log, plot_prediction_pSIE_itype)
+
+predictions_ggeffects_nsr_pSIE_log
+```
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables_log.svg", predictions_ggeffects_nsr_pSIE_log, width = 200, height = 170, units = "mm")
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables_log.png", predictions_ggeffects_nsr_pSIE_log, width = 200, height = 170, units = "mm")
+```
+
+Note: ggeffects calculates the marginal effects different than marginaleffects (see explanation in the two links above), and gives different prediction values.
+
+Plot the marginal effects with marginaleffects package: <https://vincentarelbundock.github.io/marginaleffects/articles/plot.html>
+
+```{r}
+pred_nsr_area <- marginaleffects::plot_predictions(m_nsr, condition = "area_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=area_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Area (km2)", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+pred_nsr_SLMP <- marginaleffects::plot_predictions(m_nsr, condition = "SLMP_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=SLMP_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Isolation (-SLMP)", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+pred_nsr_itype <- marginaleffects::plot_predictions(m_nsr, condition = "island_type", type = "response", re.form = NA)+
+  #geom_jitter(data = island_env_diversity, aes(x=island_type, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+pred_nsr_maxelev <- marginaleffects::plot_predictions(m_nsr, condition = "max_mx30_grd_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=max_mx30_grd_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Max elevation (m)", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+pred_nsr_season <-  marginaleffects::plot_predictions(m_nsr, condition = "mean_CHELSA_bio4_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=mean_CHELSA_bio4_log, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Temperature seasonality (°C)", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# combine 
+predictions_marginaleffects_nsr <- cowplot::plot_grid(pred_nsr_area, pred_nsr_SLMP, pred_nsr_itype, pred_nsr_maxelev, pred_nsr_season)
+
+predictions_marginaleffects_nsr
+```
+
+Prediction plots for proportion of single island endemics Note: only the significant variables are plotted; plotted with raw data points; point color matches the coefficients plot.
+
+```{r}
+pred_pSIE_area <- marginaleffects::plot_predictions(m_pSIE, condition = "area_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=area_log, y=pSIE), alpha = 0.3, color = "#009999") +
+  labs(x = "Area (km2) ", y = "Proportion single island endemics") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+pred_pSIE_SLMP <- marginaleffects::plot_predictions(m_pSIE, condition = "SLMP_log", type = "response", re.form = NA)+
+  geom_point(data = island_env_diversity, aes(x=SLMP_log, y=pSIE), alpha = 0.3, color = "#009999") +
+  labs(x = "Isolation (-SLMP)", y = "Proportion single island endemics") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+pred_pSIE_itype <- marginaleffects::plot_predictions(m_pSIE, condition = "island_type", type = "response", re.form = NA)+
+  #geom_jitter(data = island_env_diversity, aes(x=island_type, y=pSIE), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", y = "Proportion single island endemics") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+predictions_marginaleffects_pSIE <- cowplot::plot_grid(pred_pSIE_area, pred_pSIE_SLMP, pred_pSIE_itype) 
+ 
+predictions_marginaleffects_pSIE
+```
+
+Combine into one plot
+
+```{r}
+predictions_marginaleffects_nsr_pSIE <- cowplot::plot_grid(pred_nsr_area, pred_nsr_SLMP, pred_nsr_itype, pred_nsr_maxelev, pred_nsr_season, NULL, pred_pSIE_area, pred_pSIE_SLMP, pred_pSIE_itype) 
+
+predictions_marginaleffects_nsr_pSIE 
+```
+
+Save the combine marginal effect plot. Combine with standardized coefficient plot on AI to get publication ready plot
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/predictions_marginaleffects_nsr_pSIE_significant-variables.svg", predictions_marginaleffects_nsr_pSIE, width = 200, height = 170, units = "mm") 
+
+ggsave("../outputs/3_Island_biogeography_models/predictions_marginaleffects_nsr_pSIE_significant-variables.png", predictions_marginaleffects_nsr_pSIE, width = 200, height = 170, units = "mm") 
+```
+
+## Subset models with age for native species richness (NSR) and proportion endemism (pSIE)
+
+### Model summary tables
+
+```{r}
+pl_age <- c(
+  `(Intercept)` = "Intercept",
+  area_log = "Area",
+  SLMP_log = "Isolation", 
+  island_typeoceanic = "Island type [oceanic]", 
+  max_mx30_grd_log = "Max elevation",
+  mean_CHELSA_bio4_log = "Temperature seasonality",
+  mean_CHELSA_bio1 = "Annual temperature",
+  age_Ma = "Age",
+  "I(age_Ma^2)" = "Age^2"
+) 
+
+model_table_age <- tab_model(m_nsr_age, m_pSIE_age, transform = NULL,
+        dv.labels = c("Native species richness", "Proportion endemism"),
+         pred.labels = pl_age) 
+model_table_age 
+```
+
+```{r}
+# to save as an html and later convert to pdf and png
+model_table_age <- tab_model(m_nsr_age, m_pSIE_age, transform = NULL,
+        dv.labels = c("Native species richness (NSR)", "Proportion endemism (pSIE)"),
+         pred.labels = pl_age,
+        file = "../outputs/3_Island_biogeography_models/model_summary_table_age.html") 
+model_table_age 
+```
+
+### Standardized coefficients
+
+```{r}
+# set the them to bw
+set_theme(base = theme_bw()) 
+
+# Native species richness model
+plot_NSR_age <- plot_models(m_nsr_age, transform = NULL, 
+            vline.color = "dark grey",
+#           title = "Native species richness (NSR)",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio4_log" = "Temperature seasonality", "age_Ma" = "Age","I(age_Ma^2)" = expression(Age^2)),
+            axis.title = "Standardized beta coefficient",
+            colors = "#003399",
+            show.legend = F) +
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12)) 
+plot_NSR_age
+
+# pSIE model
+plot_pSIE_age <- plot_models(m_pSIE_age, transform = NULL, 
+            vline.color = "dark grey",
+#           title = "Proportion endemism (pSIE)",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio1" = "Annual temperature", "age_Ma" = "Age","I(age_Ma^2)" = expression(Age^2)),
+            axis.title = "Standardized beta coefficient",
+            colors = "#009999",
+            show.legend = F) +
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12))
+plot_pSIE_age
+```
+
+Combine into one plot
+
+```{r}
+coefficient_plot_age <- cowplot::plot_grid(plot_NSR_age, plot_pSIE_age, labels = c('A', 'B'), align = "v")
+coefficient_plot_age 
+```
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/coefficient_plots_age.png", coefficient_plot_age, height=3, width=9, units="in")
+ggsave("../outputs/3_Island_biogeography_models/coefficient_plots_age.svg", coefficient_plot_age, height=3, width=9, units="in") 
+```
+
+### Marginal effects
+
+```{r}
+# marginal effects
+pred_nsr_age <- marginaleffects::plot_predictions(m_nsr_age, condition = "age_Ma")+
+  labs(x = "Age (Ma)", y = "Native species richness") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+pred_nsr_age 
+
+# ggeffects 
+prediction_nsr_age <- ggpredict(m_nsr_age, terms = "age_Ma [all]")
+plot_prediction_nsr_age <- plot(prediction_nsr_age) + 
+  labs(x = "Age (Ma)", y = "Native species richness", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot_prediction_nsr_age 
+
+# with raw data points
+#prediction_nsr_age <- ggpredict(m_nsr_age, terms = "age_Ma_log [all]")
+#plot_prediction_nsr_age <- plot(prediction_nsr_age) + 
+#  geom_point(data = island_env_diversity_age, aes(x=age_Ma_log, y=total_species), alpha = 0.3, color = "#003399") +
+#  labs(x = "Age", y = "Native species richness", title = NULL) +
+#  theme_bw()+
+#  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+#plot_prediction_nsr_age
+```
+
+```{r}
+# marginal effects
+pred_pSIE_age <- marginaleffects::plot_predictions(m_pSIE_age, condition = "age_Ma")+
+  labs(x = "Age (Ma)", y = "Proportion endemism") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+pred_pSIE_age 
+
+# ggeffects 
+prediction_pSIE_age <- ggpredict(m_pSIE_age, terms = "age_Ma [all]")
+plot_prediction_pSIE_age <- plot(prediction_pSIE_age) + 
+  labs(x = "Age (Ma)", y = "Proportion endemism", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot_prediction_pSIE_age
+```

@@ -1,0 +1,1142 @@
+---
+title: "Apomixis sensitivity analysis"
+output: html_document
+date: "2023-10-13"
+---
+
+# Overview
+
+Aim: Assess the impact apomictic species have on the main family-level analyses.
+
+Apomixis is a mode of asexual reproduction via seeds. The British Isles and Iceland appear as hotspots of island diversity (for both native and endemic species), but the majority of species in these two island regions are apomictic (Richards.2003). Apomixis is a poorly understood trait in Asteraceae (Noyes.2007) and challenges taxonomic species concepts and delimitation (Haveman.2013). Therefore, we do not necessarily want to filter out all the apomictic species, but instead identify where exactly there are concentrations of apomictic species, and then understand how this impacts our analyses, and if it changes any patterns.
+
+There is no definitive database of apomictic species. However, there is a list of apomictic genera at the Apomixis Database (<https://www.uni-goettingen.de/de/apomixis+database/423360.html>) makes assessments at the genus level for all angiosperm families. And Noyes 2007 has assessments for Asteraceae ([http://www.globalsciencebooks.info/Online/GSBOnline/images/0712/FPSB_1(2)/FPSB_1(2)207-222o.pdf](http://www.globalsciencebooks.info/Online/GSBOnline/images/0712/FPSB_1(2)/FPSB_1(2)207-222o.pdf)). Unfortunately, using genera as proxy will undoubtedly filter out island species that are not apomictic.
+
+We will compare analyses with and without apomictic species in:
+
+1.  Geographic distribution and hotspot analysis of island diversity
+2.  Island biogeography models (glmms)
+
+References:
+
+-   Haveman, R. (2013). Freakish patterns -- species and species concepts in apomicts. Nordic Journal of Botany, 31(3), 257--269. <https://doi.org/10.1111/j.1756-1051.2013.00158.x>
+
+-   Noyes, R. D. (2007). Apomixis in the Asteraceae: Diamonds in the Rough. Functional Plant Science and Biotechnology, 1(2), 207--222.
+
+-   Richards, A. J. (2003). Apomixis in flowering plants: an overview. Philosophical Transactions of the Royal Society of London. Series B: Biological Sciences, 358(1434), 1085--1093. <https://doi.org/10.1098/rstb.2003.1294>
+
+## Preparation
+
+Load libraries:
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(svglite)
+library(cowplot)
+library(patchwork)
+# Map packages
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(viridisLite)
+library(viridis)
+# Model packages
+library(easystats)
+library(GGally)
+library(lme4) 
+library(glmmTMB)
+```
+
+Load data:
+
+Read in the Asteraceae island checklists (`Asteraceae_islands_checklists.xlsx`) which have the GCD taxonomy (status, tribe, subfamily) integrated.
+
+```{r}
+Asteraceae_islands_checklists <- read_excel("../data/data_clean/Asteraceae_islands_checklists.xlsx", guess_max = 10000)
+```
+
+Read in the environmental and island feature data associated with each entity_ID where there is atleast one Asteraceae species native to the island (`Asteraceae_island_env.xlsx`). This went through extensive preparation and cleaned up in 0_Data_preparation.Rmd.
+
+```{r}
+Asteraceae_island_env <- read_excel("../data/data_clean/Asteraceae_island_env.xlsx")
+```
+
+Read in the database of apomictic genera based of the University of Göttingen Apomixis Database.
+
+```{r}
+apomixis_Asteraceae <- read_xlsx("../data/data_raw/apomixis_Asteraceae.xlsx")
+```
+
+Filter out Apomictic species in Asteraceae.
+
+```{r}
+Asteraceae_islands_checklists_noApomix <- anti_join(Asteraceae_islands_checklists,
+                                                     apomixis_Asteraceae, 
+                                                     by = "genus")
+```
+
+# Diversity patterns
+
+First we will look at the impact of apomixis on the geographic distribution and hotspots. We need to build a database of diversity per island unit for (1) islands (2) archipelagos both (a) with apomictic species and (b) without apomictic species.
+
+## Calculate diversity for each island unit
+
+### Islands
+
+**A. With apomictic species**
+
+Summarize the data per GIFT island entity (entity_ID): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# convert NAs to 0
+Asteraceae_islands_checklists <- Asteraceae_islands_checklists %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per entity_ID
+native_endemic_counts <- Asteraceae_islands_checklists %>%
+  group_by(entity_ID) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  ungroup()
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_island_env_diversity_allunits <- Asteraceae_island_env %>%
+  left_join(native_endemic_counts, by = "entity_ID") %>%
+  relocate(c(Native_species, Endemic_species_list, Endemic_species_ref), .after = geo_entity)
+
+# Filter to strictly only islands
+Asteraceae_island_env_diversity <- Asteraceae_island_env_diversity_allunits %>%
+  filter(entity_type != "Island_group" & entity_type != "Island_group_list" & entity_type != "Island_part") # filter out island groups and archipelago lists
+
+# Filter to islands and archipelagos only represented as a group. This is just for mapping the distribution
+Asteraceae_island_env_diversity_map <- Asteraceae_island_env_diversity_allunits %>%
+  filter(entity_type != "Island_group"  & entity_type != "Island_part") 
+```
+
+**B. Without apomictic species**
+
+Summarize the data per GIFT island entity (entity_ID): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# convert NAs to 0
+Asteraceae_islands_checklists_noApomix <- Asteraceae_islands_checklists_noApomix %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per entity_ID
+native_endemic_counts_noApomix <- Asteraceae_islands_checklists_noApomix  %>%
+  group_by(entity_ID) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  ungroup()
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_island_env_diversity_allunits_noApomix <- Asteraceae_island_env %>%
+  left_join(native_endemic_counts_noApomix, by = "entity_ID") %>%
+  relocate(c(Native_species, Endemic_species_list, Endemic_species_ref), .after = geo_entity)
+
+# Filter to strictly only islands
+Asteraceae_island_env_diversity_noApomix <- Asteraceae_island_env_diversity_allunits_noApomix %>%
+  filter(entity_type != "Island_group" & entity_type != "Island_group_list" & entity_type != "Island_part") # filter out island groups and archipelago lists
+
+# Filter to islands and archipelagos only represented as a group. This is just for mapping the distribution
+Asteraceae_island_env_diversity_map_noApomix <- Asteraceae_island_env_diversity_allunits_noApomix %>%
+  filter(entity_type != "Island_group"  & entity_type != "Island_part") 
+```
+
+### Archipelagos
+
+**A. With apomictic species**
+
+Summarize the diversity data per archipelago (archipelago): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# pull out the entity ids and associated archipelago classification
+archipelagos <- select(Asteraceae_island_env, c(entity_ID, archipelago))
+
+# join the archipelago classification to the checklists
+Asteraceae_arch_checklists <- left_join(Asteraceae_islands_checklists,
+            archipelagos,
+            by ="entity_ID")
+
+# convert NAs to 0. Very important for summarise to run correctly
+Asteraceae_arch_checklists <- Asteraceae_arch_checklists %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per archipelago
+arch_native_endemic_counts <- Asteraceae_arch_checklists %>%
+  group_by(archipelago) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  drop_na(archipelago) %>%
+  ungroup()
+
+# calculate centroid lat and long based on entity_IDs 
+archipelago_lat_lon <- Asteraceae_island_env %>%
+  group_by(archipelago) %>%
+  mutate(lon_arch = mean(longitude), lat_arch = mean(latitude)) %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "lon_arch", "lat_arch") # keep only columns needed
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_arch_diversity <- arch_native_endemic_counts %>%
+  left_join(archipelago_lat_lon, by = "archipelago") 
+```
+
+**B. Without apomictic species**
+
+Summarize the diversity data per archipelago (archipelago): get a count of (\*unique) total species per entity and a count of (\*unique) endemic species per entity.
+
+```{r}
+# pull out the entity ids and associated archipelago classification
+archipelagos <- select(Asteraceae_island_env, c(entity_ID, archipelago))
+
+# join the archipelago classification to the checklists
+Asteraceae_arch_checklists_noApomix <- left_join(Asteraceae_islands_checklists_noApomix,
+            archipelagos,
+            by ="entity_ID")
+
+# convert NAs to 0. Very important for summarise to run correctly
+Asteraceae_arch_checklists_noApomix <- Asteraceae_arch_checklists_noApomix %>%
+  mutate(endemic_list = ifelse(is.na(endemic_list), 0, endemic_list)) %>%
+  mutate(endemic_ref = ifelse(is.na(endemic_ref), 0, endemic_ref))
+
+# Calculate the counts of unique native and endemic species per archipelago
+arch_native_endemic_counts_noApomix <- Asteraceae_arch_checklists_noApomix %>%
+  group_by(archipelago) %>%
+  summarise(
+    Native_species = n_distinct(work_species[native == 1]),
+    Endemic_species_list = ifelse(sum(endemic_list) > 0, n_distinct(work_species[endemic_list == 1]), 0),
+    Endemic_species_ref = ifelse(sum(endemic_ref) > 0, n_distinct(work_species[endemic_ref == 1]), 0)
+  ) %>%
+  drop_na(archipelago) %>%
+  ungroup()
+
+# calculate centroid lat and long based on entity_IDs 
+archipelago_lat_lon <- Asteraceae_island_env %>%
+  group_by(archipelago) %>%
+  mutate(lon_arch = mean(longitude), lat_arch = mean(latitude)) %>%
+  slice(1) %>%
+  dplyr::select("archipelago", "lon_arch", "lat_arch") # keep only columns needed
+
+# Now join these counts to the Asteraceae_island_env data table
+Asteraceae_arch_diversity_noApomix <- arch_native_endemic_counts_noApomix %>%
+  left_join(archipelago_lat_lon, by = "archipelago") 
+```
+
+## Map the distribution of Asteraceae on islands and archipelagos
+
+Set up the basemap aesthetics.
+
+```{r}
+# Setting up the basemap
+world <- ne_coastline(scale = "medium", returnclass = "sf")
+world_countries <- ne_countries(scale = "medium", returnclass = "sf")
+# Fixing polygons crossing dateline
+world <- st_wrap_dateline(world)
+world_countries <- st_wrap_dateline(world_countries)
+
+# Robinson projection
+Robinson <-
+  "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+
+# Background box
+xmin <- st_bbox(world)[["xmin"]]; xmax <- st_bbox(world)[["xmax"]]
+ymin <- st_bbox(world)[["ymin"]]; ymax <- st_bbox(world)[["ymax"]]
+bb <- sf::st_union(sf::st_make_grid(st_bbox(c(xmin = xmin,
+                                              xmax = xmax,
+                                              ymax = ymax,
+                                              ymin = ymin),
+                                            crs = st_crs(4326)),
+                                    n = 100))
+
+# Equator line
+equator <- st_linestring(matrix(c(-180, 0, 180, 0), ncol = 2, byrow = TRUE))
+equator <- st_sfc(equator, crs = st_crs(world))
+
+# Create linestrings for Tropic of Cancer and Tropic of Capricorn
+tropic_cancer <- st_linestring(matrix(c(-180, 23.5, 180, 23.5), ncol = 2, byrow = TRUE))
+tropic_capricorn <- st_linestring(matrix(c(-180, -23.5, 180, -23.5), ncol = 2, byrow = TRUE))
+# Assign the same CRS as the coastline data
+tropic_cancer <- st_sfc(tropic_cancer, crs = st_crs(world))
+tropic_capricorn <- st_sfc(tropic_capricorn, crs = st_crs(world))
+```
+
+### Islands
+
+**A. With apomictic species**
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_island_env_diversity_sf <- st_as_sf(Asteraceae_island_env_diversity_map, 
+                                               coords = c("longitude", "latitude"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_island_env_diversity_sf <- st_transform(x = Asteraceae_island_env_diversity_sf , crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_island_env_diversity_sf$rob_long <- st_coordinates(Asteraceae_island_env_diversity_sf)[,1] 
+Asteraceae_island_env_diversity_sf$rob_lat <- st_coordinates(Asteraceae_island_env_diversity_sf)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_island_env_diversity_sf <- Asteraceae_island_env_diversity_sf %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_all <- c(1, 5, 15, 50, 150, 400)
+
+# manually change mixed system to continetal (just for mapping here)
+Asteraceae_island_env_diversity_sf$island_type[Asteraceae_island_env_diversity_sf$island_type == "mixed"] <- "continental"
+
+# Map diversity of Asteraceae on islands
+global_map_islands <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_island_env_diversity_sf,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list,
+                 shape = island_type),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", breaks = breaks_end_all, labels = breaks_end_all) +
+  scale_shape_manual(values = c(18, 19)) +
+  labs(size = "Native species", color = "Endemic species", shape = "Island type", title = "Island diversity with apomixis") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_islands
+```
+
+**B. Without apomictic species**
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_island_env_diversity_sf_noApomix <- st_as_sf(Asteraceae_island_env_diversity_map_noApomix, 
+                                               coords = c("longitude", "latitude"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_island_env_diversity_sf_noApomix <- st_transform(x = Asteraceae_island_env_diversity_sf_noApomix , crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_island_env_diversity_sf_noApomix$rob_long <- st_coordinates(Asteraceae_island_env_diversity_sf_noApomix)[,1] 
+Asteraceae_island_env_diversity_sf_noApomix$rob_lat <- st_coordinates(Asteraceae_island_env_diversity_sf_noApomix)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_island_env_diversity_sf_noApomix <- Asteraceae_island_env_diversity_sf_noApomix %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_all <- c(1, 5, 15, 50, 150, 400)
+
+# manually change mixed system to continetal (just for mapping here)
+Asteraceae_island_env_diversity_sf_noApomix$island_type[Asteraceae_island_env_diversity_sf_noApomix$island_type == "mixed"] <- "continental"
+
+# Map diversity of Asteraceae on islands
+global_map_islands_noApomix <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_island_env_diversity_sf_noApomix,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list,
+                 shape = island_type),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", breaks = breaks_end_all, labels = breaks_end_all) +
+  scale_shape_manual(values = c(18, 19)) +
+  labs(size = "Native species", color = "Endemic species", shape = "Island type", title = "Island diversity without apomixis") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_islands_noApomix
+```
+
+### Archipelagos
+
+**A. With apomictic species**
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_arch_diversity_sf <- st_as_sf(Asteraceae_arch_diversity, 
+                                               coords = c("lon_arch", "lat_arch"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_arch_diversity_sf <- st_transform(x = Asteraceae_arch_diversity_sf, crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_arch_diversity_sf$rob_long <- st_coordinates(Asteraceae_arch_diversity_sf)[,1] 
+Asteraceae_arch_diversity_sf$rob_lat <- st_coordinates(Asteraceae_arch_diversity_sf)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_arch_diversity_sf <- Asteraceae_arch_diversity_sf %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_arch <- c(1, 5, 15, 50, 150, 400)
+
+# Map diversity of Asteraceae on islands
+global_map_arch <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_arch_diversity_sf,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", option= "plasma", breaks = breaks_end_arch, labels = breaks_end_arch) + 
+  labs(size = "Native species", color = "Endemic species", title = "Archipelago diversity with apomixis") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_arch
+```
+
+**B. Without apomictic species**
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_arch_diversity_sf_noApomix <- st_as_sf(Asteraceae_arch_diversity_noApomix, 
+                                               coords = c("lon_arch", "lat_arch"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_arch_diversity_sf_noApomix <- st_transform(x = Asteraceae_arch_diversity_sf_noApomix, crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_arch_diversity_sf_noApomix$rob_long <- st_coordinates(Asteraceae_arch_diversity_sf_noApomix)[,1] 
+Asteraceae_arch_diversity_sf_noApomix$rob_lat <- st_coordinates(Asteraceae_arch_diversity_sf_noApomix)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_arch_diversity_sf_noApomix <- Asteraceae_arch_diversity_sf_noApomix %>%
+  arrange(Endemic_species_list)
+
+# see scale breaks for color by number of endemics
+breaks_end_arch <- c(1, 5, 15, 50, 150, 400)
+
+# Map diversity of Asteraceae on islands
+global_map_arch_noApomix <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_arch_diversity_sf_noApomix,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species,
+                 color = Endemic_species_list),
+             alpha = 0.9) +
+  scale_color_viridis(trans="log", option= "plasma", breaks = breaks_end_arch, labels = breaks_end_arch) + 
+  labs(size = "Native species", color = "Endemic species", title = "Archipelago diversity without apomixis") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+global_map_arch_noApomix
+```
+
+### Apomictic difference
+
+Map the difference in diversity per island with the removal of apomictic species.
+
+Get the number of species (both native and endemic) for each island without apomixis.
+
+```{r}
+Asteraceae_island_env_diversity_map_noApomix_min <- Asteraceae_island_env_diversity_map_noApomix %>%
+  select(c(entity_ID, Native_species, Endemic_species_list)) %>%
+  rename(
+    Native_species_noApomix = Native_species,
+    Endemic_species_list_noApomix = Endemic_species_list
+  )
+```
+
+Join these counts to the full database per island and then calculate difference of removing apomictic species per island.
+
+```{r}
+Asteraceae_island_env_diversity_map_Apomixis <- left_join(
+  Asteraceae_island_env_diversity_map,
+  Asteraceae_island_env_diversity_map_noApomix_min,
+  by = "entity_ID"
+) %>% 
+  mutate(Native_species_diffApo = Native_species-Native_species_noApomix) %>% 
+  mutate(Endemic_species_list_diffApo = Endemic_species_list-Endemic_species_list_noApomix) %>%
+  relocate(Native_species_noApomix, .after = Native_species) %>%
+  relocate(Native_species_diffApo, .after = Native_species_noApomix) %>%
+  relocate(Endemic_species_list_noApomix, .after = Endemic_species_list) %>%
+  relocate(Endemic_species_list_diffApo , .after = Endemic_species_list_noApomix) 
+```
+
+Now map the difference per island when the apomictic species are removed.
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_island_env_diversity_sf_diffApo <- st_as_sf(Asteraceae_island_env_diversity_map_Apomixis, 
+                                               coords = c("longitude", "latitude"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_island_env_diversity_sf_diffApo <- st_transform(x = Asteraceae_island_env_diversity_sf_diffApo , crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_island_env_diversity_sf_diffApo$rob_long <- st_coordinates(Asteraceae_island_env_diversity_sf_diffApo)[,1] 
+Asteraceae_island_env_diversity_sf_diffApo$rob_lat <- st_coordinates(Asteraceae_island_env_diversity_sf_diffApo)[,2] 
+
+# arrange the dataframe so the islands with the most difference in endemic species plotted on top
+Asteraceae_island_env_diversity_sf_diffApo <- Asteraceae_island_env_diversity_sf_diffApo %>%
+  arrange(Endemic_species_list_diffApo)
+
+# see scale breaks for color by number of endemics species difference
+# breaks_end_all <- c(1, 5, 25, 50, 200)
+
+# manually change mixed system to continetal (just for mapping here)
+Asteraceae_island_env_diversity_sf_diffApo$island_type[Asteraceae_island_env_diversity_sf_diffApo$island_type == "mixed"] <- "continental"
+
+# Map diversity of Asteraceae on islands
+global_map_islands_diffApo <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_island_env_diversity_sf_diffApo,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species_diffApo,
+                 color = Endemic_species_list_diffApo,
+                 shape = island_type),
+             alpha = 0.9) +
+  scale_color_gradient(low = "darkgrey", high = "red") +
+  scale_shape_manual(values = c(18, 19)) +
+  labs(size = "Native species", color = "Endemic species", shape = "Island type", title = "Difference in apomictic species per island") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+
+global_map_islands_diffApo
+
+```
+
+Map the difference in diversity per archipelago with the removal of apomictic species.
+
+Get the number of species (both native and endemic) for each island without apomixis.
+
+```{r}
+Asteraceae_arch_diversity_noApomix_min <- Asteraceae_arch_diversity_noApomix %>%
+  select(c(archipelago, Native_species, Endemic_species_list)) %>%
+  rename(
+    Native_species_noApomix = Native_species,
+    Endemic_species_list_noApomix = Endemic_species_list
+  )
+```
+
+Join these counts to the full database per archipelago and then calculate difference of removing apomictic species per island.
+
+```{r}
+Asteraceae_arch_diversity_Apomixis <- left_join(
+  Asteraceae_arch_diversity,
+  Asteraceae_arch_diversity_noApomix_min,
+  by = "archipelago"
+) %>% 
+  mutate(Native_species_diffApo = Native_species-Native_species_noApomix) %>% 
+  mutate(Endemic_species_list_diffApo = Endemic_species_list-Endemic_species_list_noApomix) %>%
+  relocate(Native_species_noApomix, .after = Native_species) %>%
+  relocate(Native_species_diffApo, .after = Native_species_noApomix) %>%
+  relocate(Endemic_species_list_noApomix, .after = Endemic_species_list) %>%
+  relocate(Endemic_species_list_diffApo , .after = Endemic_species_list_noApomix) 
+```
+
+Now map the difference per archipelago when the apomictic species are removed.
+
+```{r}
+# convert to SF object and make lat long column spatial
+Asteraceae_arch_diversity_sf_diffApo <- st_as_sf(Asteraceae_arch_diversity_Apomixis, 
+                                               coords = c("lon_arch", "lat_arch"),
+                                               crs = 4326)
+# convert lat+long to Robinson projection
+Asteraceae_arch_diversity_sf_diffApo <- st_transform(x = Asteraceae_arch_diversity_sf_diffApo, crs = Robinson)
+
+# get coordinates and add back to dataframe
+Asteraceae_arch_diversity_sf_diffApo$rob_long <- st_coordinates(Asteraceae_arch_diversity_sf_diffApo)[,1] 
+Asteraceae_arch_diversity_sf_diffApo$rob_lat <- st_coordinates(Asteraceae_arch_diversity_sf_diffApo)[,2] 
+
+# arrange the dataframe so the islands with the most endemic species plotted on top
+Asteraceae_arch_diversity_sf_diffApo <- Asteraceae_arch_diversity_sf_diffApo %>%
+  arrange(Endemic_species_list_diffApo)
+
+# see scale breaks for color by number of endemics
+#breaks_end_arch <- c(1, 5, 15, 50, 150, 400)
+
+# Map diversity of Asteraceae on islands
+global_map_arch_diffApo <- ggplot() +
+  geom_sf(data = bb, fill = "white") +
+  geom_sf(data = equator, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_cancer, color = "grey", linewidth = 0.4) +
+  geom_sf(data = tropic_capricorn, color = "grey", linewidth = 0.4) +
+  geom_sf(data = world_countries, fill = "#EEEEEE", color = "#EEEEEE")+
+  geom_sf(data = bb, fill = NA, color = "black") +
+  geom_sf(data = world, linewidth = 0.4) +
+  geom_point(data = Asteraceae_arch_diversity_sf_diffApo,
+             aes(x = rob_long, y = rob_lat,
+                 size = Native_species_diffApo,
+                 color = Endemic_species_list_diffApo),
+             alpha = 0.9) +
+  scale_color_gradient(low = "darkgrey", high = "red") + 
+  labs(size = "Native species", color = "Endemic species", title = "Difference in apomictic species per archipelago") +
+  coord_sf(crs = Robinson) +
+  theme_bw()+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.border = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank())
+
+global_map_arch_diffApo
+```
+
+## Save datatables and maps
+
+Save the island and archipelago that have columns for diversity with and without apomictic species and a column calculating the difference.
+
+```{r}
+# Islands
+write_xlsx(Asteraceae_island_env_diversity_map_Apomixis, "../outputs/5_Apomixis/Asteraceae_island_env_diversity_Apomixis.xlsx")
+
+# Archipelagos
+write_xlsx(Asteraceae_arch_diversity_Apomixis, "../outputs/5_Apomixis/Asteraceae_arch_diversity_Apomixis.xlsx")
+```
+
+Save the maps.
+
+```{r}
+# Islands 
+ggsave("../outputs/5_Apomixis/Geographic_distribution_islands_apo.svg", global_map_islands, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/5_Apomixis/Geographic_distribution_islands_noApo.svg", global_map_islands_noApomix, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/5_Apomixis/Geographic_distribution_islands_diffApo.svg", global_map_islands_diffApo, width = 300, height = 180, units = "mm")
+
+# Archipelagos
+ggsave("../outputs/5_Apomixis/Geographic_distribution_arch_apo.svg", global_map_arch, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/5_Apomixis/Geographic_distribution_arch_noApo.svg", global_map_arch_noApomix, width = 300, height = 180, units = "mm")
+
+ggsave("../outputs/5_Apomixis/Geographic_distribution_arch_diffApo.svg", global_map_arch_diffApo, width = 300, height = 180, units = "mm")
+```
+
+## Summary
+
+The islands with the largest difference with the removal of apomictic species include:
+
+*Rank in difference of native species*
+
+1.  Iceland (316)
+2.  Ireland (195)
+3.  Corsica (108)
+
+*Rank in difference of endemic species (list)*
+
+1.  Iceland (261)
+2.  Corsica (22) and Shetland (22)
+3.  Ireland (16)
+
+At the island scale, the islands most effected by apomixis are Iceland and Ireland (British Isles). Interesting to note that while Corsica has many apomictic species, even after the apomictic species are remove the island is still in the top to most diverse islands for native species (change from rank 2 to 5).
+
+The archipelagos with the largest difference with the removal of apomictic species include:
+
+*Rank in difference of native species*
+
+1.  British Isles (368)
+2.  Iceland (316)
+3.  Corsica (108)
+
+*Rank in difference of endemic species (list)*
+
+1.  British Isles (357)
+2.  Iceland (261)
+3.  Japan (33)
+
+At the archipelago scale, the islands with the largest difference in diversity are the British Isles and Iceland. For endemic species, there is a large break in the difference between species (with apomixis and without) betweeen Iceland and Japan.
+
+Moreover, with the removal of the Iceland and the British Isles (Ireland for island-scale ranking) from the ranking, the composition of the top ten most diverse islands and archipelagos does not change after the apomictic species are filtered out. Therefore, the main analyses will included the apomictic species and the anonomly of diversity in Iceland and the British Isles due to apomictic species will be noted and included in the main body of the paper, rather than filtering and sweeping aside this poorly understood trait.
+
+# Island biogeography models
+
+Here we assess whether filtering out the apomictic species affects the island biogeography models. Specifically, (1) does the removal of apomictic species change the selection of the best global model for native species richness (NSR) or proportion of single island endemics (pSIE), and (2) does the removal of apomictic species change the relationships between island diversity and the predictor variables?
+
+## Prepare dataframe for models
+
+First we need to prepare the data frame for modeling. We will use the `Asteraceae_island_env_diversity_map_Apomixis`. This includes columns for both diversity with and without apomictic species for both native and endemic species. However, this is the dataframe for the maps and also includes archipelagos that are only represented by their archipelago list (`island_group_list`), so we start by filter those out to get a dataframe of strictly islands.
+
+```{r}
+Asteraceae_island_env_diversity_Apomixis <- Asteraceae_island_env_diversity_map_Apomixis %>%
+  filter(entity_type == "Island")
+```
+
+Calculate proportion endemism
+
+```{r}
+# with apomixis included
+Asteraceae_island_env_diversity_Apomixis$pSIE <- Asteraceae_island_env_diversity_Apomixis$Endemic_species_list/Asteraceae_island_env_diversity_Apomixis$Native_species
+
+# without apomixis 
+Asteraceae_island_env_diversity_Apomixis$pSIE_noApomix <- Asteraceae_island_env_diversity_Apomixis$Endemic_species_list_noApomix/Asteraceae_island_env_diversity_Apomixis$Native_species_noApomix
+```
+
+Simplify the climatic variable names:
+
+```{r}
+Asteraceae_island_env_diversity_Apomixis <- Asteraceae_island_env_diversity_Apomixis %>%
+  rename(mean_CHELSA_bio1 = "mean_CHELSA_bio1_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio12 = "mean_CHELSA_bio12_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio4 = "mean_CHELSA_bio4_1981-2010_V.2.1") %>%
+  rename(mean_CHELSA_bio15 = "mean_CHELSA_bio15_1981-2010_V.2.1")
+```
+
+Filter out islands that are below 1km2. Following approach in Taylor (2020) and discussion with PW (Aug 2022) - GIFT data has a bias for checklists of small islands due to previous research in the lab and islands smaller than 1km2 not accurately represented by the scale of the environmental data.
+
+```{r}
+Asteraceae_island_env_diversity_Apomixis <- Asteraceae_island_env_diversity_Apomixis %>%
+  filter(area >= 1)
+```
+
+This reduces the dataset from 791 islands to 514 islands.
+
+Transform skewed predictor variables, according to data exploration in `3_A_Island_biogeography_data_exploration.Rmd`. Skewed variables are log10 transformed, and variables that have 0 in range are log10+1 transformed.
+
+```{r}
+# area
+Asteraceae_island_env_diversity_Apomixis$area_log <- log10(Asteraceae_island_env_diversity_Apomixis$area)
+
+# distance
+Asteraceae_island_env_diversity_Apomixis$dist_log <- log10(Asteraceae_island_env_diversity_Apomixis$dist +1)
+
+# SLMP
+Asteraceae_island_env_diversity_Apomixis$SLMP_log <- log10(Asteraceae_island_env_diversity_Apomixis$SLMP)
+
+# mean elevation
+Asteraceae_island_env_diversity_Apomixis$mean_mn30_grd_log <- log10(Asteraceae_island_env_diversity_Apomixis$mean_mn30_grd +1)
+
+# max elevation
+Asteraceae_island_env_diversity_Apomixis$max_mx30_grd_log <- log10(Asteraceae_island_env_diversity_Apomixis$max_mx30_grd +1)
+
+# terrain ruggedness 
+Asteraceae_island_env_diversity_Apomixis$mean_mn30_grd_TRI_log <- log10(Asteraceae_island_env_diversity_Apomixis$mean_mn30_grd_TRI +1)
+
+# precipitation
+Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio12_log <- log10(Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio12)
+
+# temperature seasonality 
+Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio4_log <- log10(Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio4)
+
+# precipitation seasonality 
+Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio15_log <- log10(Asteraceae_island_env_diversity_Apomixis$mean_CHELSA_bio15)
+```
+
+Scale and center the predictor variables.
+
+```{r}
+predictor = c("area_log", "dist_log",	"SLMP_log", "mean_mn30_grd_log",	"max_mx30_grd_log",	"mean_mn30_grd_TRI_log", "mean_CHELSA_bio1",	"mean_CHELSA_bio12_log",	"mean_CHELSA_bio4_log",
+              "mean_CHELSA_bio15_log")
+Asteraceae_island_env_diversity_Apomixis[,predictor] = scale(Asteraceae_island_env_diversity_Apomixis[,predictor], center = TRUE, scale = TRUE)
+```
+
+Convert SLMP to a more intuitive measure of isolation: multiple by -1.
+
+```{r}
+Asteraceae_island_env_diversity_Apomixis <- Asteraceae_island_env_diversity_Apomixis %>%
+  mutate(SLMP_log = SLMP_log*(-1))
+```
+
+## Model comparison without Apomixis
+
+First we will build up the GLMMs with the apomictic species removed, and test whether the same global model is preferred even with the removal of apomictic species. The model structure follows `3_B_Island_Biogeography_model_comparison.Rmd`, see script for details.
+
+**Native species richness (NSR) without apomixis**
+
+```{r}
+# total species ~ area
+m_nsr_1 <- glmmTMB(Native_species_noApomix ~ area_log, 
+                   data = Asteraceae_island_env_diversity_Apomixis, 
+                   family=poisson(link="log"))
+
+# total species ~ isolation
+m_nsr_2 <- glmmTMB(Native_species_noApomix ~ dist_log, 
+                   data = Asteraceae_island_env_diversity_Apomixis, 
+                   family=poisson(link="log"))
+
+# archipelago as a random effect with a random intercept and mixed mean; (1|group)
+m_nsr_3 <- glmmTMB(Native_species_noApomix ~
+                   area_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# archipelago as a random effect with an uncorrelated random slope and intercept; (fixed effect||random effect)
+m_nsr_4 <- glmmTMB(Native_species_noApomix ~
+                   area_log + (area_log||archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# archipelago as a random effect with an uncorrelated random slope and intercept; (fixed effect||random effect)
+m_nsr_5 <- glmmTMB(Native_species_noApomix ~
+                   area_log + (area_log||archipelago),
+              family = nbinom2,
+              ziformula=~1,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add distance
+m_nsr_6 <- glmmTMB(Native_species_noApomix ~
+                   area_log + dist_log + (area_log||archipelago) + (dist_log||archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add in zero inflation to the model
+m_nsr_7 <- glmmTMB(Native_species_noApomix ~
+                   area_log + dist_log + (area_log||archipelago) + (dist_log||archipelago),
+              family = nbinom2,
+              ziformula=~1,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add distance and archipelago random intercept and fixed mean (1|group)
+m_nsr_8 <- glmmTMB(Native_species_noApomix ~
+                   area_log + dist_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# SLMP
+m_nsr_9 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add island type
+m_nsr_10 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add max altitude
+m_nsr_11 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# TRI
+m_nsr_12 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Both elevation and TRI
+m_nsr_13 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add mean temperature (not transformed)
+m_nsr_14 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add mean precipitation
+m_nsr_15 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio12_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add mean temp and precipitation
+m_nsr_16 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + mean_CHELSA_bio12_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add temperature seasonality
+m_nsr_17 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add precip seasonality 
+m_nsr_18 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# Add temp seasonality and precip seasonality 
+m_nsr_19 <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+```
+
+Compare models: the build up of the glmm with biological relevant predictors.
+
+```{r}
+m_nsr_compare <- compare_performance(m_nsr_8, m_nsr_9, m_nsr_10, m_nsr_11, m_nsr_12, m_nsr_13, m_nsr_14, m_nsr_15, m_nsr_16, m_nsr_17, m_nsr_18, m_nsr_19)
+
+m_nsr_compare
+```
+
+**Proportion single island endemics (pSIE) without apomixis**
+
+```{r}
+# area
+m_pSIE_1 <- glmmTMB(pSIE_noApomix ~ area_log, 
+                    data = Asteraceae_island_env_diversity_Apomixis, 
+                    family=binomial)
+
+# distance
+m_pSIE_2 <- glmmTMB(pSIE_noApomix ~ dist_log, 
+                    data = Asteraceae_island_env_diversity_Apomixis, 
+                    family=binomial)
+
+# area and distance
+m_pSIE_3 <- glmmTMB(pSIE_noApomix ~
+                   area_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# area and distance
+m_pSIE_4 <- glmmTMB(pSIE_noApomix ~
+                   area_log + dist_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# SLMP instead of dist
+m_pSIE_5 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add island type
+m_pSIE_6 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add max altitude
+m_pSIE_7 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# TRI
+m_pSIE_8 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + mean_mn30_grd_TRI_log+ (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add max alt and TRI
+m_pSIE_9 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_mn30_grd_TRI_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add mean ann temp 
+m_pSIE_10 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# mean ann precip only
+m_pSIE_11 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio12_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add mean annual temp and precip
+m_pSIE_12 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 +  mean_CHELSA_bio12_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add temp seasonality
+m_pSIE_13 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add precip seasonality
+m_pSIE_14 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+
+# add seasonality and aridity
+m_pSIE_15 <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + mean_CHELSA_bio15_log + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+```
+
+Compare models: the build up of the glmm with biological relevant predictors.
+
+```{r}
+compare_performance(m_pSIE_4, m_pSIE_5, m_pSIE_6, m_pSIE_7, m_pSIE_8, m_pSIE_9, m_pSIE_10, m_pSIE_11, m_pSIE_12, m_pSIE_13, m_pSIE_14, m_pSIE_15)
+```
+
+## Best models with and without Apomixis
+
+**Native Species Richness**
+
+With apomictic species
+
+```{r}
+m_nsr_apomix <- glmmTMB(Native_species ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+```
+
+Without apomictic species
+
+```{r}
+m_nsr_noApomix <- glmmTMB(Native_species_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio4_log + (1|archipelago),
+              family = nbinom2,
+              data = Asteraceae_island_env_diversity_Apomixis)
+```
+
+**Proportion Single Island Endemics (pSIE)**
+
+With apomictic species
+
+```{r}
+m_pSIE_apomix <- glmmTMB(pSIE ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species,
+              data = Asteraceae_island_env_diversity_Apomixis)
+```
+
+Without apomictic species
+
+```{r}
+m_pSIE_noApomix <- glmmTMB(pSIE_noApomix ~
+                   area_log + SLMP_log + island_type + max_mx30_grd_log + mean_CHELSA_bio1 + (1|archipelago),
+              family = betabinomial(link = "logit"),
+              weights= Native_species_noApomix,
+              data = Asteraceae_island_env_diversity_Apomixis)
+```
+
+## Compare relationships with and without Apomixis
+
+Plotting Estimates (Fixed Effects) of models with and without apomixis.
+
+Plot the coefficients with sjPlots. Package documentation here: <https://strengejacke.github.io/sjPlot/articles/plot_model_estimates.html#plotting-estimates-of-generalized-linear-models>
+
+```{r}
+# set the them to bw
+set_theme(base = theme_bw())
+
+# Native species richness model
+plot_NSR <- plot_models(m_nsr_apomix, m_nsr_noApomix, transform = NULL, 
+            vline.color = "dark grey",
+            title = "Native species richness",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "island_typeoceanic" = "Island type [oceanic]", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio4_log" = "Temperature seasonality"),
+            axis.title = "Standardized coefficient",
+            legend.title = "Datasets", 
+            m.labels = c("Full dataset (Apomictics included)", "Apomictics removed"))+
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12),
+        legend.position="bottom")
+plot_NSR
+
+# pSIE model
+plot_pSIE <- plot_models(m_pSIE_apomix, m_pSIE_noApomix, transform = NULL, 
+            vline.color = "dark grey",
+           title = "Proportion endemism (pSIE)",
+            axis.labels = c("area_log" = "Area", "SLMP_log" = "Isolation", "island_typeoceanic" = "Island type [oceanic]", "max_mx30_grd_log" = "Max elevation", "mean_CHELSA_bio1" = "Annual temperature"),
+            axis.title = "Standardized coefficient",
+            legend.title = "Datasets", 
+            m.labels = c("Full dataset (Apomictics included)", "Apomictics removed"))+
+  theme(title=element_text(size=14, hjust=0.5),
+        axis.title=element_text(size=12),
+        axis.text = element_text(size=12),
+        legend.position="bottom")
+plot_pSIE
+```
+
+Combine into one plot and save.
+
+```{r}
+coefficient_plot_apomixis <- cowplot::plot_grid(plot_NSR, plot_pSIE, align = "v")
+coefficient_plot_apomixis 
+```
+
+```{r}
+ggsave("../outputs/5_Apomixis/coefficient_plots_apomixis.svg", coefficient_plot_apomixis, height=6, width=12, units="in")
+```
+
+## Summary
+
+**Model comparison**
+
+During model comparison without apomictic species for NSR, the best global models were m_nsr_17 and m_nsr_19. These two models were nearly equivocal; m_nsr_17 had an AIC score 0.7 points lower than m_nsr_19 (3553.9 vs 3553.3 respectively) but m_nsr_17 had a better BIC score and this model includes fewer parameters. For NSR, the best overall model is still m_nsr_17 both with and without apomictic species. In other words, removing apomictic species does not significantly change the best global model for NSR.
+
+During model comparison without apomictic species for pSIE, the best model was m_pSIE_10 for AIC and BIC score. This matches the best global model with the inclusion of apomictic species. Removing apomictic species does not significantly change the best global model for pSIE.
+
+**Relationships between island diversity and the predictor variables with and without apomixis**
+
+There is no major change in the relationships between the predictor variables and response variables after the removal of apomictic species. The only change of note is an increase in strength of the mean annual temperature variable after the removal of apomictic species. Between the model comparison indicating no change in the best global model and no major change in relationship, the main analyses will **include** apomictic species in order to capture to full variation of Asteraceae diversity on island and bring notice to an understudied trait of Asteraceae in to northern European island regions.

@@ -1,0 +1,563 @@
+---
+title: 'Island biogeography patterns: Data exploration'
+output: html_document
+date: "2023-10-03"
+---
+
+# Overview
+
+Aim: The aim of this script is to carry out data exploration prior to the modelling. Data exploration protocol follows: Zuur et al. (2010). A protocol for data exploration to avoid common statistical problems. Methods in Ecology and Evolution, 1(1), 3--14. [https://doi.org/10.1111/j.2041-210x.2009.00001.x](https://doi.org/10.1111/j.2041-210x.2009.00001.x*)
+
+Main steps (Outline):
+
+1.  Overview of the island data
+
+2.  Data exploration and assumptions
+
+    1.  Outliers (X, Y)
+
+    2.  Normality (Y) and Zero Inflation (Y)
+
+    3.  Missing data (X)
+
+    4.  Collinearity / Correlation (X)
+
+    5.  Relationships (X, Y)
+
+    6.  Independence (Y)
+
+    7.  Preliminary check of transformations
+
+3.  Summary
+
+## Preparation
+
+Load libraries:
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(svglite)
+
+library(easystats)
+library(GGally)
+library(lme4) 
+library(glmmTMB)
+```
+
+Load data:
+
+`Asteraceae_island_env_diversity.xlsx` is a cleaned dataset that has all the strictly island units in GIFT3 with island feature data and a summary of their diversity (natives and endemics). This dataset started with the extraction and cleaning in 0_data_preparation.Rmd, and then diversity per geographic unit calculated in `2_A_Geographic_diversity.Rmd`. Note: `entity_type` has been manually created to filter to true islands, and `Asteraceae_island_env_diversity.xlsx` has filtered out all island groups and island parts.
+
+```{r}
+island_env_diversity <- read_xlsx("../data/data_clean/Asteraceae_island_env_diversity.xlsx")
+```
+
+Make a long version
+
+```{r}
+island_env_diversity_long <- pivot_longer(island_env_diversity,
+                                             c("Native_species","Endemic_species_list"),
+                                          names_to = "diversity", 
+                                          values_to = "diversity_count")
+```
+
+# Overview of the island data
+
+Initial island features and environmental data selected from GIFT:
+
+
+**Island features**
+
+-   longitude	and latitude
+
+-   area: Area of region
+
+-   dist: Distance to nearest mainland (coast to coast, excluding Antarctica)
+
+-   SLMP: Surrounding landmass proportion
+
+-   LGM_area: Last Glacial Maximum area
+
+-   GMMC: Last Glacial Maximum mainland connection
+
+-   botanical_continent: Botanical continent as defined by TDWG level 1
+
+-   biome: Biomes from Ecoregions 2017
+
+-   archipelago: Archipelago classification
+
+-   geology: island geologic classification (atoll, floor, volcanic, fragment, shelf, mixed)
+
+-   island type: oceanic or continental classification
+
+-   age_Ma: island age and reference sources
+
+**Environmental and climatic variables**
+
+-   mean_mn30_grd: Mean Altitude, Mean elevation per gridcell
+
+-   mean_mx30_grd: (Mean) Maximum Altitude elevation per gridcell
+
+-   max_mx30_grd: (GIFT Max) Maximum elevation per gridcell
+
+-   mean_mn30_grd_TRI: Terrain ruggedness index
+
+-   mean_CHELSA_bio1_1981-2010_V.2.1: Annual Mean Temperature
+
+-   mean_CHELSA_bio12_1981-2010_V.2.1: Annual Precipitation
+
+-    mean_CHELSA_bio4_1981-2010_V.2.1: Temperature seasonality
+
+-   mean_CHELSA_bio15_1981-2010_V.2.1: Precipitation seasonality
+
+-   mean_TempStability: Temperature stability since the Last Glacial Maximum
+
+# Data exploration and assumptions
+
+## Outliers (X, Y)
+
+```{r}
+# Boxplot
+ggplot(island_env_diversity_long, aes(y = diversity_count))+ 
+  geom_boxplot()+
+  facet_wrap(~diversity, scale="free")+
+  theme_bw()
+
+
+# Cleveland plot
+dotchart(sort(island_env_diversity$Native_species),
+         pch = 19,  
+         lcolor = "transparent",
+         frame.plot = TRUE,
+         main = "Native species",
+         xlab = "Species richness")
+
+dotchart(sort(island_env_diversity$Endemic_species_list),
+         pch = 19,  
+         lcolor = "transparent",
+         frame.plot = TRUE,
+         main = "Endemic species",
+         xlab = "Species richness")
+```
+
+From inspection of the boxplots and cleveland plots of the response variables (species richness native and endemic), there are clearly outliers. This is to be expected- this is count data and not normally distributed and skewed (confirmed below) and a mix of island types from very small islands with one species (or zero endemics) to large mega-diverse continental islands. 
+
+
+At this stage, do not remove any outliers and deal with the distribution of the data through glmm and selecting an appropriate error distribution.
+
+## Normality (Y) and Zero Inflation (Y)
+
+Native species
+
+```{r}
+ggplot(island_env_diversity, aes(x = Native_species) ) +
+    geom_histogram(binwidth = 5, fill = "dark red")  +
+    theme_bw(base_size = 16) +
+    labs(y = "Frequency",
+         title = "Total diversity",
+         subtitle = "Distribution and zero frequency") +
+    annotate(geom = "text",
+            label = paste("Proportion zero:", mean(island_env_diversity$Native_species == 0), 
+                        "\nMax diversity:", max(island_env_diversity$Native_species) ),
+                        x = 100, y = 175, size = 4)
+```
+
+Endemic species
+
+```{r}
+ggplot(island_env_diversity, aes(x = Endemic_species_list) ) +
+    geom_histogram(binwidth = 5, fill = "dark red")  +
+    theme_bw(base_size = 16) +
+    labs(y = "Frequency",
+         title = "Endemic diversity",
+         subtitle = "Distribution and zero frequency") +
+    annotate(geom = "text",
+            label = paste("Proportion zero:", mean(island_env_diversity$Endemic_species_list == 0), 
+                        "\nMax diversity:", max(island_env_diversity$Endemic_species_list) ),
+                        x = 150, y = 500, size = 4)
+```
+
+The data is not normally distributed. Both total species and endemic species are highly right skewed. This is not surprising since this is count data, but it is clear a linear model is not appropriate. The response variable needs to either be transformed (ie log10+1), or use a glmm with poisson or negative binomial error distribution. 
+
+
+There is no zero inflation in total species (ie native species) because the dataset only includes islands with at least one native Asteraceae species present. There is however, significant zero inflation in endemic species with 84% of the islands having 0 endemic species.
+
+To account for the skewed distribution, a glmm with poisson or negative binomial error distribution is needed. And zero-inflated glmm models should be explored for the endemic species \~ island features (see Stoklosa (2022)).
+
+## Missing data (X)
+
+```{r}
+# Summarize the number of missing rows in the predictor variables
+island_env_diversity %>%
+  select(everything()) %>%  
+  summarise_all(funs(sum(is.na(.))))
+```
+
+Predictor variables with many missing rows:
+
+-   SLMP (7)
+
+-   age_Ma (526, 66%)
+
+SLMP is the only major predictor that has NAs (7). This is likely to have a negligible effect, and SLMP has been shown to be a better isolation predictor than distance in other GIFT studies.
+
+For age, run a complimentary/separate analysis for oceanic islands with age as an additional fixed effect following methods in Taylor (2021).
+
+## Collinearity / Correlation (X)
+
+Overview of correlation between covariates.
+
+Island features:
+
+```{r}
+corr <- island_env_diversity %>%
+    correlation(
+      select = c("Native_species", "Endemic_species_list", "area", "dist", "SLMP", "latitude", "island_type", "geology", "archipelago", "botanical_continent","LGM_area", "GMMC", "biome", "age_Ma"),
+    )
+summary(corr)
+
+corr %>%
+  summary() %>%
+  plot()
+```
+
+Environmental data:
+
+```{r}
+corr_env <- island_env_diversity %>%
+    correlation(
+      select = c("Native_species", "Endemic_species_list", "mean_mn30_grd", "mean_mx30_grd", "max_mx30_grd", "mean_mn30_grd_TRI", "mean_CHELSA_bio1_1981-2010_V.2.1", "mean_CHELSA_bio12_1981-2010_V.2.1", "mean_CHELSA_bio4_1981-2010_V.2.1", "mean_CHELSA_bio15_1981-2010_V.2.1", "mean_TempStability"))
+summary(corr_env)
+
+corr_env %>%
+  summary() %>%
+  plot()
+```
+
+Next steps: Check collinearity on regression model by calculating VIF. Use (more info here [https://easystats.github.io/performance/reference/check_collinearity.html)](https://easystats.github.io/performance/reference/check_collinearity.html))
+
+## Relationships (X, Y)
+
+What are the relationships between Y and X variables?
+
+Plot the response variables (species richness of native and endemic species) against each predictor variable / covariate.
+
+
+Native species: 
+
+(Break into subsections for easier visualization)
+
+Native species - area and isolation and age
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Native_species", "area", "dist", "SLMP", "LGM_area", "age_Ma"))+
+  theme_bw()
+```
+
+Native species - elevation and topography and geology (island type)
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Native_species", "mean_mn30_grd", "mean_mx30_grd", "max_mx30_grd", "mean_mn30_grd_TRI", "island_type"))+
+  theme_bw()
+
+```
+
+Native species - climate
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Native_species", "mean_CHELSA_bio1_1981-2010_V.2.1", "mean_CHELSA_bio12_1981-2010_V.2.1", "mean_CHELSA_bio4_1981-2010_V.2.1", "mean_CHELSA_bio15_1981-2010_V.2.1", "mean_TempStability"))+
+  theme_bw()
+```
+
+Endemic species:
+
+
+Endemic species - area and isolation and age
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Endemic_species_list", "area", "dist", "SLMP", "LGM_area", "age_Ma"))+
+  theme_bw()
+```
+
+Endemic species - elevation and topography and geology (island type)
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Endemic_species_list", "mean_mn30_grd", "mean_mx30_grd", "max_mx30_grd", "mean_mn30_grd_TRI", "island_type"))+
+  theme_bw()
+```
+
+Endemic species - climate
+
+```{r, warning = FALSE, message= FALSE}
+ggpairs(island_env_diversity, columns = c("Endemic_species_list", "mean_CHELSA_bio1_1981-2010_V.2.1", "mean_CHELSA_bio12_1981-2010_V.2.1", "mean_CHELSA_bio4_1981-2010_V.2.1", "mean_CHELSA_bio15_1981-2010_V.2.1", "mean_TempStability"))+
+  theme_bw()
+```
+
+## Independence (Y)
+
+Are observations of the response variable independent? No, there is non-independence in the island data due to geographic structure of islands to archipelagos. Account for this by including archipelago as random effect in a mixed model ((g)lmm). See: Bunnefeld, N. & Phillimore, A. B. (2012). Island, archipelago and taxon effects: mixed models as a means of dealing with the imperfect design of nature's experiments. Ecography, 35(1), 15--22. [https://doi.org/10.1111/j.1600-0587.2011.07078.x](https://doi.org/10.1111/j.1600-0587.2011.07078.x*) for more details.
+
+## Preliminary check of transformations
+
+Area:
+
+-   Greenland massive area
+
+-   highly skewed, no 0s
+
+-   Action: log10 transform
+
+```{r}
+ggplot(island_env_diversity, aes(x = area)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(area))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+```
+
+dist:
+
+-   Skewed, 2 islands with 0 (Birbie island, Islet near Perth 121)
+
+-   Action: log10+1 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = dist)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(dist+1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+SLMP
+
+-   Slightly skewed, no 0s
+
+-   Action: log10 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = SLMP)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(SLMP))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+LGM_area
+
+-   two islands with 0
+
+-   Action: log10+1 (but will not use LGM_area in model so not necessary)
+
+```{r}
+ggplot(island_env_diversity, aes(x = LGM_area)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(LGM_area+1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+age_Ma
+
+-   Skewed, and no 0s
+
+-   Log transforming does seem to help, but Rampal and Koen recommended against log transforming age in the model (pers. comm.)
+
+-   Action: none
+
+```{r}
+ggplot(island_env_diversity, aes(x = age_Ma)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(age_Ma))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_mn30_grd
+
+-   Skewed, many islands with 0s
+
+-   Action: log10+1 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = mean_mn30_grd)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_mn30_grd+1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+max_mx30grd
+
+-   Skewed, and many 0s
+
+-   Action: log10+1 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = max_mx30_grd)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(max_mx30_grd+1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_mn30_grd_TRI
+
+-   Skewed, and many 0s
+
+-   Action: log10+1 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = mean_mn30_grd_TRI)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_mn30_grd_TRI+1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_CHELSA_bio1_1981-2010_V.2.1: Annual Mean Temperature
+
+-   Transformation does not improve distribution
+
+-   Action: no transformation
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio1 = "mean_CHELSA_bio1_1981-2010_V.2.1")
+ggplot(island_env_diversity, aes(x = mean_CHELSA_bio1)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_CHELSA_bio1))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_CHELSA_bio12_1981-2010_V.2.1: Annual Precipitation
+
+-   Slightly skewed, no 0s
+
+-   Action: log10 transformation
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio12 = "mean_CHELSA_bio12_1981-2010_V.2.1")
+ggplot(island_env_diversity, aes(x = mean_CHELSA_bio12)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_CHELSA_bio12))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_CHELSA_bio4_1981-2010_V.2.1: Temperature seasonality
+
+-   Slightly skewed, no 0s
+
+-   Action: log10 transformation
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio4 = "mean_CHELSA_bio4_1981-2010_V.2.1")
+ggplot(island_env_diversity, aes(x = mean_CHELSA_bio4)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_CHELSA_bio4))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_CHELSA_bio15_1981-2010_V.2.1: Precipitation seasonality
+
+-   Slightly skewed, no 0s
+
+-   Action: log10 transformation
+
+```{r}
+island_env_diversity <- island_env_diversity %>%
+  rename(mean_CHELSA_bio15 = "mean_CHELSA_bio15_1981-2010_V.2.1")
+ggplot(island_env_diversity, aes(x = mean_CHELSA_bio15)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_CHELSA_bio15))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+mean_TempStability: Temperature stability since the Last Glacial Maximum
+
+-   Slightly skewed, no 0s
+
+-   Action: log10 transformation
+
+```{r}
+ggplot(island_env_diversity, aes(x = mean_TempStability)) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+
+ggplot(island_env_diversity, aes(x = log10(mean_TempStability))) +
+    geom_histogram(fill = "dark red")  +
+    theme_bw()
+```
+
+**Transformations summary:**
+
+-   area: log10
+
+-   dist: log10+1
+
+-   SLMP: log10 (take inverse as well)
+
+-   age_Ma: no transformation
+
+-   mean_mn30_grd: log10+1
+
+-   max_mx30grd: log10+1
+
+-   mean_mn30_grd_TRI: log10+1
+
+-   mean_CHELSA_bio1_1981-2010_V.2.1: no transformation
+
+-   mean_CHELSA_bio12_1981-2010_V.2.1: log10
+
+-   mean_CHELSA_bio4_1981-2010_V.2.1: log10
+
+-   mean_CHELSA_bio15_1981-2010_V.2.1: log10
+
+-   mean_TempStability: log10
+
+# Summary
+
+Key points:
+
+**Normality and zero inflation (Y):** Both native species and endemic species are not normally distributed and have a strong right skew. Endemic species has high zero inflation - 84% of the islands have 0 endemic species. Action: use generalized linear mixed effect models (glmms) with a Poisson or negative binomial error distribution to address main questions, and explore zero-inflated glmmm for endemic species.
+
+**Missing data (X):** Island age (age_Ma) has a lot of missing data - 66% of the islands lacking an age. Action: separate analysis with age for oceanic islands with age available, following methods in Taylor (2021).
+
+**Collinearity:** Correlation matrix detected potential collinearity in several key predictor variables: distance-SLMP, distance-LGM_area, SLMP_LGM_area, temperature-precipitation, temperature-all elevation variables, and all elevation variables have strong correlation (ie mean_mn30_grd, mean_mx30_grd, TRI). Action: Select subset of predictor variables that have no or minimal correlation and select single predictor where variables overlap (ie only one of the elevation parameters to best explain insular elevation range, and SLMP or distance as the best measure of isolation). Calculate VIF of the global (most complex) model and reanalyze and update model if needed.
+
+**Independence (Y):** There is non-independence in the island data due to geographic structure of islands to archipelagos. Action: archipelago as random effect in a mixed model ((g)lmm).
+
+**Skewness of predictor variables:** The distribution of the continuous predictor variables were plotted raw and with a log10 transformation (log10+1 if variable had 0s) to examine where transformation is needed and appropriate. The summary of transformations needed listed above.
