@@ -1,0 +1,924 @@
+---
+title: "Data preparation"
+author: "Lizzie Roeble"
+date: "08/31/2023"
+output: html_document
+---
+
+# Overview
+
+Aim: Prepare the GIFT data for downstream analyses.
+
+See paper for GIFT data structure and details: Weigelt, P., König, C. & Kreft, H. GIFT -- A Global Inventory of Floras and Traits for macroecology and biogeography. J Biogeogr 47, 16--43 (2020).GI
+
+GIFT R package: <https://biogeomacro.github.io/GIFT/> and <https://www.biorxiv.org/content/10.1101/2023.06.27.546704v1>
+
+Main steps:
+
+1.  Extract island Asteraceae checklists from GIFT
+
+    1.  Extract island checklists
+
+    2.  Retrieve checklist references
+
+    3.  Retrieve environmental variables for islands
+
+2.  Extract checklists for all angiosperms native to islands from GIFT
+
+    1.  Extract island checklists
+
+    2.  Retrieve checklist references
+
+3.  Add Asteraceae taxonomy (Global Compositae Database)
+
+4.  Update and fine-tune GIFT geoentities data
+
+    1.  Classify island type (ie. oceanic vs continental)
+
+    2.  Update archipelago classification
+
+    3.  Create new entity classification (ie. island, island part, island group)
+
+    4.  Manually review and clean
+
+5.  Save cleaned data
+
+Load packages:
+
+```{r, message = F}
+library(tidyverse)
+library(GIFT)
+library(readxl)
+library(writexl)
+```
+
+# 1. Extract island Asteraceae checklists from GIFT
+
+## Extract island checklists
+
+Set the API.
+
+Note: This is "restricted" api of GIFT offers access to a few resources not publicly available: This include data from the World Checklist of Vascular Plants (WCVP, POWO). (Remove access to restricted API when making code publicly available.)
+
+```{r}
+api <- "https://giftuser:Hepaticanobilis*@gift.uni-goettingen.de/api/restricted/"
+```
+
+Increase the timeout for larger downloads
+
+```{r}
+options(timeout = max(1000, getOption("timeout")))
+```
+
+Set availability of references. Exclude most restricted references but include the following:
+
+-   10647 (WCVP)
+
+-   10653 (Vanuatu)
+
+-   10644 (Galapagos)
+
+-   10495 (Madeira)
+
+-   10648 (Juan Fernandez)
+
+-   10347 (Cook Islands)
+
+```{r}
+# all GIFT v3 references
+ref <- GIFT_references(GIFT_version = "3.0", api = api)
+# We exclude most restricted resources
+ref_exclude <- ref[which(ref$restricted == 1), ] 
+#  But we keep some key island refs
+ref_exclude <- ref_exclude[which(!ref_exclude$ref_ID %in% c(10647, 10653, 10644, 10495, 10648, 10347)), ]
+```
+
+Extract island checklists where there is at least one native Asteraceae species.
+
+```{r, label=Asteraceae_islands_checklists, cache=TRUE}
+Asteraceae_islands_GIFT <- GIFT_checklists(
+  taxon_name = "Asteraceae",
+  complete_taxon = FALSE, 
+  floristic_group = "native", 
+  complete_floristic = FALSE,  
+  geo_type = "Island", 
+  suit_geo = TRUE,
+  shp = NULL, coordinates = NULL, overlap = "centroid_inside",
+  remove_overlap = FALSE,
+  ref_excluded = unique(ref_exclude$ref_ID),
+  area_threshold_island = 0,
+  overlap_th = 0.1,
+  namesmatched = TRUE,
+  list_set_only = FALSE,
+  GIFT_version = "3.0",
+  api = api
+)
+```
+
+A few notes on important arguments and how specified above:
+
+-   `taxon_name`: specify taxonomic group of interest
+
+-   `complete_taxon`: Determines whether only regions represented by checklists in GIFT that completely cover the taxon of interest should be retrieved. Set here to False in order to capture checklists that are below the family level (ie only represented by certain genera)
+
+-   `floristic_group`: All, naturalized, native, endemic. Here set to native
+
+-   `complete_floristic`: Logical stating you want to retrieve checklists that only contain the exhaustive list of the `floristic_group` argument or as well incomplete lists. Here set to False to capture lists that only have endemics. (is this correct? test out to be sure naturalized is not included too)
+
+-   `geo_type`: decide on the geologic unit of interest (Mainland, Island, All). "Island" will include Island, Island Group and island Part. Here set to only Islands
+
+-   `area_threshold_island`: A number stating from which surface the smallest overlapping polygon is kept. By default set to 0 square kilometer (meaning that by default the smallest islands will be conserved). NTS: what impact does this have?
+
+-   `namesmatched`: logical. `FALSE` by default, set to `TRUE` if you want the original species name as they came in the references as well as details on the taxonomic harmonization.
+
+Initial exploration of the checklists returned:
+
+```{r}
+Asteraceae_islands_checklists <- Asteraceae_islands_GIFT[["checklists"]]
+```
+
+Count unique native species.
+
+```{r}
+Asteraceae_islands_checklists %>%
+  summarise(count = n_distinct(work_species))
+```
+
+Count number of endemic species (Endemic ref)
+
+```{r}
+Asteraceae_islands_checklists %>%
+  filter(endemic_ref == 1) %>%
+  summarise(count = n_distinct(work_species))
+```
+
+Count number of endemic species (Endemic list)
+
+```{r}
+Asteraceae_islands_checklists %>%
+  filter(endemic_list == 1) %>%
+  summarise(count = n_distinct(work_species))
+```
+
+Any naturalized species?
+
+```{r}
+Asteraceae_islands_checklists %>%
+  filter(naturalized == 1) %>%
+  summarise(count = n_distinct(work_species))
+
+```
+
+142 naturalized species on various entity units. Remove these from the checklists by filtering out all rows where quest_native = 1 .
+
+```{r}
+Asteraceae_islands_checklists <- Asteraceae_islands_checklists %>%
+  filter(quest_native != 1| is.na(quest_native)) # be sure to keep NAs
+```
+
+How many unique island units make up the checklists?
+
+```{r}
+Asteraceae_islands_checklists %>%
+  summarise(count = n_distinct(entity_ID))
+```
+
+What islands do not have native Asteraceae in GIFT?
+
+```{r}
+Asteraceae_islands_list <-  Asteraceae_islands_GIFT[["lists"]]
+
+Asteraceae_islands_list %>%
+  anti_join(Asteraceae_islands_checklists,
+            by = "entity_ID")
+```
+
+Note: This shows islands that do not have native Asteraceae in GIFT. Interpretation and use with caution. This does **not** show true absence necessarily. It is best used to indicate region/island gaps for data (species checklists). However, some individual islands have native Asteraceae, but the data source (flora or checklists) is at the archipelago level. This is also something to keep in mind when calculating endemism per island, as some islands with endemics will be missing or show no endemism if the smallest regional unit is the archipelago.
+
+## Retrieve checklist references
+
+Retrieve the references used to generate the island Asteraceae checklists
+
+```{r}
+References_island_Asteraceae_checklists <- ref %>%
+  semi_join(
+  Asteraceae_islands_checklists,
+  by = "ref_ID") %>%
+  select(c("ref_ID", "ref_long", "geo_entity_ref"))
+```
+
+## Retrieve environmental variables for islands
+
+Extract island features, environmental variables, and climatic variables for each island unit (polygon) in the island Asteraceae checklist.
+
+Examine list of GIFT environmental variables available.
+
+```{r, eval=F}
+GIFT_env_misc <- GIFT_env_meta_misc( api="https://gift.uni-goettingen.de/api/extended/", GIFT_version="latest" )
+
+GIFT_env_raster<- GIFT_env_meta_raster( api="https://gift.uni-goettingen.de/api/extended/", GIFT_version="latest" )
+```
+
+Retrieve the following island features (misc) and environmental variables (raster).
+
+```{r}
+Asteraceae_island_env <- GIFT_env(
+  entity_ID = unique(Asteraceae_islands_checklists$entity_ID),
+  miscellaneous = c("longitude",	"latitude", "area", "dist", "SLMP", "LGM_area", "GMMC", "botanical_continent", "biome", "arch_lvl_1", "arch_lvl_2", "arch_lvl_3"), 
+  rasterlayer = c("mn30_grd", "mx30_grd", "mn30_grd_TRI", "CHELSA_bio1_1981-2010_V.2.1", "CHELSA_bio12_1981-2010_V.2.1", "CHELSA_bio4_1981-2010_V.2.1", "CHELSA_bio15_1981-2010_V.2.1", "ai_v3_yr", "TempStability"), 
+  sumstat = "mean",
+  GIFT_version = "3.0",
+  api = api
+  )
+
+# Retrieve max elevation (mx30_grd) with max summary stat
+Asteraceae_env_max <- GIFT_env(
+  entity_ID = unique(Asteraceae_islands_checklists$entity_ID),
+  miscellaneous = NULL, 
+  rasterlayer = "mx30_grd", 
+  sumstat = "max",
+  GIFT_version = "3.0",
+  api = api
+  )
+
+# Combine into one table 
+Asteraceae_island_env <- 
+  select(Asteraceae_env_max, -"geo_entity") %>% # drop for cleaner match
+  left_join(
+    Asteraceae_island_env,
+    Asteraceae_env_max, 
+    by = "entity_ID") %>%
+  relocate("max_mx30_grd", .after = "mean_mx30_grd") # relocate column to keep db organized
+```
+
+Notice, there are 915 unique entity_ids with native Asteraceae. However, we extracted environmental data for only 896 units. What are the missing 19 units? This totals to 89 native island species.
+
+```{r}
+Asteraceae_islands_checklists %>%
+  distinct(entity_ID) %>%
+  anti_join(Asteraceae_island_env,
+            by = "entity_ID")
+```
+
+Q: Just no environmental data for these units?
+
+# 2. Extract checklists for all angiosperms native to islands from GIFT
+
+## Extract island checklists
+
+Extract checklists for all angiosperms native to islands
+
+```{r, label=Angiosperms_islands_checklists, cache=TRUE}
+Angiosperms_islands_GIFT <- GIFT_checklists(
+  taxon_name = "Angiospermae",
+  complete_taxon = FALSE, 
+  floristic_group = "native", 
+  complete_floristic = FALSE,  
+  geo_type = "Island", 
+  suit_geo = TRUE,
+  shp = NULL, coordinates = NULL, overlap = "centroid_inside",
+  remove_overlap = FALSE,
+  ref_excluded = unique(ref_exclude$ref_ID),
+  area_threshold_island = 0,
+  overlap_th = 0.1,
+  namesmatched = TRUE,
+  list_set_only = FALSE,
+  GIFT_version = "3.0",
+  api = api
+)
+```
+
+Initial exploration of the checklists returned:
+
+```{r}
+Angiosperms_islands_checklists <- Angiosperms_islands_GIFT[["checklists"]]
+Angiosperms_islands_lists <- Angiosperms_islands_GIFT[["lists"]]
+```
+
+Add the geo_entity (ie island name) from `Angiosperms_islands_lists` to the `Angiosperms_islands_checklists`.
+
+```{r}
+# get a list of all the unique entity_IDs and geo_entities
+Angiosperms_islands_lists_min <- Angiosperms_islands_lists %>%
+  select("entity_ID", "geo_entity") %>%
+  distinct(entity_ID, .keep_all = TRUE)
+
+# add geo_entities to checklists datatable
+Angiosperms_islands_checklists <- left_join(
+  Angiosperms_islands_checklists,
+  Angiosperms_islands_lists_min,
+  by = "entity_ID")
+
+# a little organization to keep to columns together
+Angiosperms_islands_checklists <- Angiosperms_islands_checklists %>%
+  relocate(geo_entity, .after = entity_ID)
+```
+
+Count unique native species in each family
+
+```{r}
+Angiosperms_islands_checklists %>%
+  group_by(family) %>%
+  summarize(native = n_distinct(work_species)) %>%
+  arrange(desc(native))
+```
+
+Count the number of endemic species in each family (Endemic ref)
+
+```{r}
+Angiosperms_islands_checklists %>%
+  filter(endemic_ref == 1) %>%
+  group_by(family) %>%
+  summarize(endemic_ref = n_distinct(work_species)) %>%
+  arrange(desc(endemic_ref))
+```
+
+Count the number of endemic species in each family (Endemic list)
+
+```{r}
+Angiosperms_islands_checklists %>%
+  filter(endemic_list == 1) %>%
+  group_by(family) %>%
+  summarize(endemic_list = n_distinct(work_species)) %>%
+  arrange(desc(endemic_list))
+```
+
+Any naturalized species?
+
+```{r}
+Angiosperms_islands_checklists %>%
+  filter(naturalized == 1) %>%
+  summarise(count = n_distinct(work_species))
+```
+
+Remove the naturalized species
+
+```{r}
+Angiosperms_islands_checklists <- Angiosperms_islands_checklists %>%
+  filter(quest_native != 1 | is.na(quest_native))
+```
+
+## Retrieve checklist references
+
+Retrieve the references used to generate the island Angiosperm checklists
+
+```{r}
+References_island_Angiosperm_checklists <- ref %>%
+  semi_join(
+  Angiosperms_islands_checklists,
+  by = "ref_ID")%>%
+  select(c("ref_ID", "ref_long", "geo_entity_ref"))
+```
+
+## Initial assessment of island diversity per family
+
+Create a preliminary dataframe of island diversity per family.
+
+Note: detailed comparison of angiosperm family diversity done in 1_Angiosperm_insular_diversity.Rmd
+
+```{r}
+# calculate native species per family
+angio_native_islands <- Angiosperms_islands_checklists %>%
+  group_by(family) %>%
+  summarize(native = n_distinct(work_species)) %>%
+  arrange(desc(native))
+
+# calculate endemic (ref) species per family
+angio_endemic_ref_islands <- Angiosperms_islands_checklists %>%
+  filter(endemic_ref == 1) %>%
+  group_by(family) %>%
+  summarize(endemic_ref = n_distinct(work_species)) %>%
+  arrange(desc(endemic_ref))
+
+# calculate endemic (list) species per family
+angio_endemic_list_islands <- Angiosperms_islands_checklists %>%
+  filter(endemic_list == 1) %>%
+  group_by(family) %>%
+  summarize(endemic_list = n_distinct(work_species)) %>%
+  arrange(desc(endemic_list))
+
+# join into one dataframe
+angio_diversity_islands <- angio_native_islands %>%
+  left_join(
+    angio_endemic_ref_islands,
+    by = "family") %>%
+  left_join(
+    angio_endemic_list_islands,
+    by = "family")
+```
+
+# 3. Add Asteraceae taxonomy (Global Compositae Database)
+
+## Construct clean Asteraceae taxonomic database
+
+The main objective in this section is to match the island species (ie work_species, the name resolved by WCVP) to its intrafamily taxonomy (subfamily, tribe) and get the Global Compositae name status (accepted, not accepted, unassessed).
+
+First, read in the taxon database (`taxon.csv`) of the Global Compositae Database (GCD). The GCD is the main taxonomic backbone for the family and curated by Asteraceae experts (<https://www.compositae.org/gcd/index.php>). The version of the database utilized here is from a bulk download in November 2022. In `taxon.csv` each row is a unique taxonomic unit with associated data. The taxonomic hierarchy of the GCD is structured by the parent-child relationship.
+
+```{r}
+taxon <- read_csv("../data/data_raw/GCD_Nov2022/taxon.csv", guess_max = 10000, col_types = cols(infraspecificEpithet = "c"))
+# Check that unicode translation is correct (ie × not √ó)
+```
+
+Here we want to get the full taxonomic classification (including Tribe and Subfamily) for each species within the GCD. Using the parent-child relationship, consecutively link the parent taxon rank for each species using a look-up table for each rank.
+
+(1) Make look up tables for each taxon rank between species to family.
+
+```{r}
+# filter to create look-up tables for each taxonRank
+taxon_species <- taxon %>%
+  filter(taxonRank == "Species")
+
+taxon_genus <- taxon %>%
+  filter(taxonRank == "Genus") %>% # filter to rank
+  select(c(scientificName, scientificNameID, taxonomicStatus, acceptedNameUsage, acceptedNameUsageID, parentNameUsage, parentNameUsageID)) %>% # take only the columns needed 
+  rename_with(~ paste("genus", .x, sep = "_")) # rename columns so rank info is preserved when joining to species table
+
+taxon_subtribe <- taxon %>%
+  filter(taxonRank == "Subtribe") %>%
+  select(c(scientificName, scientificNameID, taxonomicStatus, acceptedNameUsage, acceptedNameUsageID, parentNameUsage, parentNameUsageID)) %>%
+  rename_with(~ paste("subtribe", .x, sep = "_"))
+
+taxon_tribe <- taxon %>%
+  filter(taxonRank == "Tribe") %>%
+  select(c(scientificName, scientificNameID, taxonomicStatus, acceptedNameUsage, acceptedNameUsageID, parentNameUsage, parentNameUsageID)) %>%
+  rename_with(~ paste("tribe", .x, sep = "_"))
+
+taxon_subfamily <- taxon %>%
+  filter(taxonRank == "Subfamily") %>%
+  select(c(scientificName, scientificNameID, taxonomicStatus, acceptedNameUsage, acceptedNameUsageID, parentNameUsage, parentNameUsageID)) %>%
+  rename_with(~ paste("subfamily", .x, sep = "_"))
+```
+
+(2) Use the look up tables to get each rank between species and family.
+
+```{r}
+asteraceae_taxonomy_full <- taxon_species %>% 
+  # start with species rank
+  # join the parent to the name in the look up table, continue left_join for each rank up
+  left_join(taxon_genus, by = c("parentNameUsageID" = "genus_scientificNameID"), keep = T) %>% 
+  left_join(taxon_subtribe, by = c("genus_parentNameUsageID" = "subtribe_scientificNameID"), keep = T) %>%
+  # note: not all species have a subtribe, so for tribe rank we need to match to the parent of genus and subtribe
+  left_join(taxon_tribe, by = c("subtribe_parentNameUsageID" = "tribe_scientificNameID"), keep = T) %>%
+  left_join(taxon_tribe, by = c("genus_parentNameUsageID" = "tribe_scientificNameID"), keep = T) %>%
+  # to remove the duplicate tribe columns, unite .x and .y and remove the NAs
+  unite(tribe_scientificName, c(tribe_scientificName.x, tribe_scientificName.y), na.rm = T) %>%
+  unite(tribe_scientificNameID, c(tribe_scientificNameID.x, tribe_scientificNameID.y), na.rm = T) %>%
+  unite(tribe_taxonomicStatus, c(tribe_taxonomicStatus.x, tribe_taxonomicStatus.y), na.rm = T) %>%
+  unite(tribe_acceptedNameUsage, c(tribe_acceptedNameUsage.x, tribe_acceptedNameUsage.y), na.rm = T) %>%
+  unite(tribe_acceptedNameUsageID, c(tribe_acceptedNameUsageID.x, tribe_acceptedNameUsageID.y), na.rm = T) %>%
+  unite(tribe_parentNameUsage, c(tribe_parentNameUsage.x, tribe_parentNameUsage.y), na.rm = T) %>%
+  unite(tribe_parentNameUsageID, c(tribe_parentNameUsageID.x, tribe_parentNameUsageID.y), na.rm = T)%>%
+  # final join to match subfamily to tribe
+  left_join(taxon_subfamily, by = c("tribe_parentNameUsageID" = "subfamily_scientificNameID"))
+```
+
+`asteraceae_taxonomy_full` has the full data associated with each classification hierarchy in the GCD. Filter to relevant classification data from downstream work (i.e. subtribe, tribe, subfamily).
+
+```{r}
+# Filter to classification data needed, use taxonomic status to filter out unaccepted names later, and use only accepted classification names. then rename
+asteraceae_taxonomy <- asteraceae_taxonomy_full %>%
+  select(c(scientificName, acceptedNameUsage, taxonomicStatus, genus, genus_acceptedNameUsage, subtribe_acceptedNameUsage, tribe_acceptedNameUsage, subfamily_acceptedNameUsage)) %>%
+  rename(Subtribe = subtribe_acceptedNameUsage, 
+         Tribe = tribe_acceptedNameUsage, 
+         Subfamily = subfamily_acceptedNameUsage)
+```
+
+**Important note!**
+
+The GCD relies on expert assessments and up-to-date with current nomenclature (as of Nov 2022). However, based on the Mandel 2019 phylogeny (PNAS, <https://doi.org/10.1073/pnas.1903871116>), formal changes to the higher classificaiton (tribe and subfamily) are currently needed and/or are in progress. Classification changes were proposed Susanna 2020 (Taxon, <https://doi.org/10.1002/tax.12235>) based on Mandel (2019) and are well supported by the backbone phylogeny of the family, although some of the classifications have not been formally proposed yet. Here, we manually update the taxonomy to match Mandel (2019) and Susanna (2020).
+
+Manually update the classification of the GCD:
+
+1\. Update tribe Hyalideae from Wunderlichioideae (GCD) to Stifftioideae
+
+```{r}
+asteraceae_taxonomy$Subfamily[asteraceae_taxonomy$Tribe == 'Hyalideae'] <- "Stifftioideae"
+```
+
+2\. Cyclolepis (genus of 1-2 species) weakly linked to Wunderlichieae in Mandel 2019 but weakly linked to Gochnatieae in analyses using some chloroplast data by Funk (Susanna 2020). Follow Susanna (2020) and Mandel (2019) is putting Cyclolepis as a placeholder for tribe and reassigning the subfamily from Mutisioideae (GCD) to Gochnatioideae (Susanna 2020).
+
+```{r}
+asteraceae_taxonomy$Tribe[asteraceae_taxonomy$genus == 'Cyclolepis'] <- "Cyclolepis"
+asteraceae_taxonomy$Subfamily[asteraceae_taxonomy$genus == 'Cyclolepis'] <- "Gochnatioideae"
+```
+
+3\. Move tribe Tarchonantheae and tribe Oldenburgieae into new subfamily Tarchonanthoideae
+
+```{r}
+asteraceae_taxonomy$Subfamily[asteraceae_taxonomy$Tribe == 'Tarchonantheae'] <- "Tarchonanthoideae"
+asteraceae_taxonomy$Subfamily[asteraceae_taxonomy$Tribe == 'Oldenburgieae'] <- "Tarchonanthoideae"
+```
+
+4\. The genus Distephanus (subtribe Distephaninae) is currently in tribe Vernonieae according to GCD. Previous work indicates Distephanus is seperate clade and should be elevated to new tribe: Distephaneae. Here we tentatively erect new Distephaneae tribe, but note this tribe has not yet been formally described.
+
+```{r}
+asteraceae_taxonomy$Tribe[asteraceae_taxonomy$genus == 'Distephanus'] <- "Distephaneae"
+```
+
+5\. Update taxonomy for Feddea cubensis -\> tribe Inuleae (original GCD) to Feddeeae (Cariaga 2008)
+
+```{r}
+asteraceae_taxonomy$Tribe[asteraceae_taxonomy$scientificName == 'Feddea cubensis'] <- "Feddeeae"
+```
+
+Differences between GCD and Susanna (2020) / Mandel (2019) that could not be resolved. According to previous taxonomy the tribe Arctotideae (GCD) is a sinlge tribe by phylogeny (Mandel.2019) indicates this should be split into two separate clades. However, which genera and species belong in each clade is uncertain. So for now, treat Arctotideae as single tribe.
+
+Save family level classification:
+
+`asteraceae_taxonomy.csv` = classification at the species level; including accepted, uncertain, unaccepted and duplicate species
+
+`asteraceae_taxonomy_accepted.csv` = classification at species level of only
+
+```{r}
+# Classification including accepted, uncertain, unaccepted and duplicate species
+write_csv(asteraceae_taxonomy, "../data/data_clean/asteraceae_taxonomy.csv")
+write_xlsx(asteraceae_taxonomy, "../data/data_clean/asteraceae_taxonomy.xlsx")
+```
+
+Additionally filter to only distinct accepted species, and then save.
+
+```{r}
+asteraceae_taxonomy_accepted <- asteraceae_taxonomy %>%
+  filter(taxonomicStatus == "accepted") %>%
+  distinct(scientificName, .keep_all = T)
+
+write_csv(asteraceae_taxonomy_accepted, "../data/data_clean/asteraceae_taxonomy_accepted.csv")
+write_xlsx(asteraceae_taxonomy_accepted, "../data/data_clean/asteraceae_taxonomy_accepted.xlsx")
+```
+
+## Match intrafamily taxonomy to island Asteraceae species
+
+Get a list of the unique island species and match with GCD taxonomy
+
+```{r}
+# Island species list
+island_species <- Asteraceae_islands_checklists %>%
+  distinct(work_species)
+
+# Match island species to taxonomy
+island_species_taxonomy <- inner_join(asteraceae_taxonomy,
+                                      island_species,
+                                      by = c("scientificName" = "work_species")) %>%
+  distinct(scientificName, .keep_all = T) %>%
+  rename("work_species" = "scientificName")
+# note: need to use distinct because some island species matching multiple rows/species in GDC due to same taxon with diff authority/accepted status
+# change scientificName to work_species to show clearly that the name being matched is coming from the resolved name in GIFT
+```
+
+Note: Island species missing taxonomic classification - many are spp. spec. and natural hybrids. Some species have not been formally described (ie Psiadia reticulata). Get a list of all the island species that did not match GCD and write out to correct manually.
+
+```{r}
+# list of island species that did not match
+island_species_taxonomy_missing <- anti_join(island_species, island_species_taxonomy, by = "work_species")
+
+# write to csv to fix manually
+write.csv(island_species_taxonomy_missing, "../data/data_raw/island_species_taxonomy_missing.csv", fileEncoding = "UTF-8")
+```
+
+Read in the manually updated taxonomy for the island species missing in match with GCD. Note the `taxonomicStatus` is listed as NA and way to identify GIFT island species that did not have a match with GCD.
+
+```{r}
+island_species_taxonomy_missing_update <- read_csv("../data/data_raw/island_species_taxonomy_missing_updated.csv")
+
+# bind tables together and get list of unique island species in GIFT with classification
+island_species_taxonomy <- bind_rows(island_species_taxonomy, island_species_taxonomy_missing_update)
+
+# remove any duplicate rows 
+island_species_taxonomy <- island_species_taxonomy %>%
+  distinct()
+```
+
+There are 53 species records that matched to GCD (so did not get picked up as without assessment) but do not have a tribe or subfamily classification. Manually add taxonomy:
+
+```{r}
+# Phacellothrix
+island_species_taxonomy$Tribe[island_species_taxonomy$work_species == "Phacellothrix cladochaeta"] <- "Gnaphalieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$work_species == "Phacellothrix cladochaeta"] <- "Asteroideae"
+
+# Lagenifera (sic Lagenophora)
+island_species_taxonomy$Tribe[island_species_taxonomy$work_species == "Lagenifera montana"] <- "Astereae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$work_species == "Lagenifera montana"] <- "Asteroideae"
+
+island_species_taxonomy$Tribe[island_species_taxonomy$work_species == "Lagenifera billardierei"] <- "Astereae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$work_species == "Lagenifera billardierei"] <- "Asteroideae"
+
+island_species_taxonomy$Tribe[island_species_taxonomy$work_species == "Lagenifera stipitata"] <- "Astereae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$work_species == "Lagenifera stipitata"] <- "Asteroideae"
+
+# Uniyala (see Robinson 2009)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Uniyala"] <- "Vernonieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Uniyala"] <- "Vernonioideae"
+
+# Hainanecio
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Hainanecio"] <- "Senecioneae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Hainanecio"] <- "Asteroideae"
+
+# Libinhania (see Kilian 2017)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Libinhania"] <- "Gnaphalieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Libinhania"] <- "Asteroideae"
+
+# Astartoseris (see Kilian 2017, Willdenowia)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Astartoseris"] <- "Cichorieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Astartoseris"] <- "Cichorioideae"
+
+# Balladonia (see Short 2016)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Balladonia"] <- "Gnaphalieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Balladonia"] <- "Asteroideae"
+
+# Japonicalia (see Ren 2017)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Japonicalia"] <- "Senecioneae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Japonicalia"] <- "Asteroideae"
+
+# Nahuatlea (see Funk 2017)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Nahuatlea"] <- "Gochnatieae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Nahuatlea"] <- "Gochnatioideae"
+
+# Taimingasa (see Ren 2017)
+island_species_taxonomy$Tribe[island_species_taxonomy$genus == "Taimingasa"] <- "Senecioneae"
+island_species_taxonomy$Subfamily[island_species_taxonomy$genus == "Taimingasa"] <- "Asteroideae"
+```
+
+Match Asteraceae taxonomy (`island_species_taxonomy`) (taxonomicStatus, tribe, and subfamily) to the island Asteraceae checklist (`Asteraceae_islands_checklist`).
+
+```{r}
+Asteraceae_islands_checklists <- 
+  select(island_species_taxonomy, work_species, taxonomicStatus, Tribe, Subfamily) %>%
+  left_join(Asteraceae_islands_checklists, island_species_taxonomy,
+            by = "work_species") %>%
+  # clean up names and column organization
+  rename(GCD_taxonomicStatus = taxonomicStatus) %>%
+  relocate(work_species, .before = work_author) %>%
+  relocate(c(GCD_taxonomicStatus, Tribe, Subfamily), .after = cons_status)
+```
+
+# 4. Update and fine-tune GIFT geoentities data
+
+In addition the environmental data extracted above, we also want to get information on the geology, origin (continental, oceanic, or mixed), and age of each island. Here we make use of an internal GIFT `geology.csv` database of islands. This is a good starting point, but there are many islands with Asteraceae that are missing, so we will clean the island data set to be tailored for this project and fill in data for islands that are missing.
+
+Read in the orignal version of the `geology.csv` data set.
+
+```{r}
+geology <- read_csv("../data/data_raw/geology.csv") %>%
+  select(-"...1")
+```
+
+First, explore overlap between the two GIFT environmental/island databases (`geology` and `Asteraceae_island_env`), then connect island geology to `Asteraceae_island_env`.
+
+```{r}
+# how many entities do Asteraceae_env and geology share?
+inner_join(Asteraceae_island_env, geology, by = "entity_ID") %>%
+  count("entity_ID")
+
+# how many entities do they NOT share? 
+anti_join(Asteraceae_island_env, geology, by = "entity_ID") %>%
+  count("entity_ID")
+```
+
+We have environmental data for 896 islands, and 566 match to assessments in geology while 330 do not have assessments.
+
+Join the geology data available to the environmental data.
+
+```{r}
+Asteraceae_island_env <- left_join(Asteraceae_island_env,
+                          geology,
+                          by = "entity_ID")
+```
+
+## Classify island type (coarse)
+
+We need an accurate classification of island type: continental or oceanic. Leverage GIFT's geology classification (ie atoll, volcanic shelf, etc) in `geology.csv` to coarsely classify islands to oceanic or continental.
+
+Identify and classify island type (first coarse pass): Create new `island_type` column and designate based on `geology` column. Generalizing the geology column to oceanic, continental, (and mixed)
+
+-   oceanic \<=\> atoll, floor, volcanic, floor/volcanic, atoll/volcanic
+
+-   continental \<=\> fragment, shelf
+
+-   other mixed combinations need to be addressed individually:
+
+    -   fragment/volcanic,
+
+    -   shelf/volcanic,
+
+    -   atoll/shelf/volcanic,
+
+    -   atoll/floor/fragment,
+
+    -   fragment/shelf/volcanic,
+
+    -   atoll/floor/fragment/shelf/volcanic
+
+```{r}
+Asteraceae_island_env <- Asteraceae_island_env %>%
+  mutate(
+    island_type = case_when(
+      geology == "atoll" ~ "oceanic", # specify when geology cases oceanic
+      geology == "floor" ~ "oceanic",
+      geology == "volcanic" ~ "oceanic",
+      geology == "floor/volcanic" ~ "oceanic",
+      geology == "atoll/volcanic" ~ "oceanic",
+      is.na(geology) ~ NA_character_, # maintain NAs as true NAs
+      geology == "shelf" ~ "continental", # specify when geology cases non oceanic
+      geology == "fragment" ~ "continental"
+      )) %>%
+  relocate(island_type, .after = geology)
+
+# nts on case_when: if variable is not matched above, its returned as NA. to specify variable for all cases that dont match, use TRUE ~ "continental" (beware that would turn true NAs to "continental" unless specified). more info https://dplyr.tidyverse.org/reference/case_when.html
+```
+
+How many entities need a classification of o/c?
+
+```{r}
+sum(is.na(Asteraceae_island_env$island_type))
+```
+
+Next step is to manually review (below). Specifically, review automated assessment of oceanic status (correct?), address mixed combinations individually (assign oceanic, continental, or mixed), and assign origin status to entities that do not have geology (NAs)
+
+## Update archipelago classification (coarse)
+
+GIFT has a 3-tier archipelago classification going from broad to narrower classification (where applicable): arch_lvl_1, arch_lvl_2, arch_lvl_3. For this project, we want to update the archipelago classification to capture archipelagos that have lvl_2 delineation, or default to lvl_1 if finer classification is not available/necessary.
+
+Classify archipelagos fist by arch_lvl_2 -\> arch_lvl_1
+
+```{r}
+Asteraceae_island_env <- Asteraceae_island_env %>%
+  mutate(archipelago = coalesce(arch_lvl_2, arch_lvl_1)) %>%
+  relocate(archipelago, .after = arch_lvl_3)
+```
+
+(To-Do: Replace the archipelago ID with the actual name)
+
+Example code:
+
+```{r, eval=FALSE}
+# Create a lookup table as a named vector from GIFT_lists
+lookup_table <- setNames(GIFT_lists$geo_entity, GIFT_lists$entity_ID)
+
+# Replace values in arch_lvl_1 using the lookup table
+Asteraceae_island_envt$arch_lvl_1 <- lookup_table[Asteraceae_island_env$arch_lvl_1]
+
+```
+
+Next step is to manually review this new archipelago assessment.
+
+## Update entity classification
+
+GIFT has an `entity_class` field in the `lists` dataframe that designates whether the geoentity is an c("Island", "Island/Mainland", "Mainland", "IslandGroup", "IslandPart"). There are several misclassifications. We want to update this so later when we filter to only islands we are not accidentally capturing island groups (archipelagos).
+
+First, copy the `entity_class` column from `Asteraceae_islands_list` to `Asteraceae_island_env`. We will use this column later to fine tune units into islands, island groups (archipelagos), and island parts during the manual clean.
+
+```{r}
+Asteraceae_islands_list_min <- Asteraceae_islands_list %>%
+  select(entity_ID, entity_class)%>%
+  distinct()
+Asteraceae_island_env <- left_join(
+  Asteraceae_island_env,
+  Asteraceae_islands_list_min, 
+  by = "entity_ID") %>%
+  relocate(entity_class, .after = entity_ID)
+```
+
+Now, we add a new field called entity_type to more accurately specify the type of entity.
+
+Definition of entity_type variables:
+
+-   Island (single island unit)
+
+-   Island_part (part of an single island, ie Ireland)
+
+-   Island_group (entity of more than one island and/or an archipelago)
+
+-   Island_group_list (entity of more than one island and/or an archipelago where that unit list is only present in GIFT as a group, ie no individual island lists)
+
+```{r}
+# add empty column for entity_type
+Asteraceae_island_env <- Asteraceae_island_env %>%
+  add_column(entity_type = NA) %>%
+  relocate(entity_type, .after = entity_class)
+```
+
+During the manual review (below), we add assessments of entity type for each island.
+
+## Manual review
+
+Manual review and edits notes:
+
+**GIFT1.0**
+
+-   First pass by Lizzie Roeble; second pass by Luis Valente; final version reviewed and discussed jointly (March 2021)
+
+-   Actions and changes:
+
+    -   Update oceanic/continental status: (a) add o/c status to NAs; (b) clean or update o/c status
+
+    -   Update archipelago groups: update or change archipelago grouping for more natural or logical groups for this project
+
+**GIFT2.0**
+
+-   Cleaned GIFT 2.0 geoentities that had not been updated in first round of GIFT 1.0 cleaning above (Lizzie Roeble; August 2021)
+
+The cleaned geology database from the two above manual reviews is archived with the raw data from this project here `/data/data_raw/geology_clean_GIFT1-2.csv`
+
+**GIFT3**
+
+-   Manual clean and update of the geology data for all the new entities that are included in GIFT3
+
+-   Review done by Lizzie Roeble and Luis Valente (September 2023)
+
+The cleaned geology database that includes the manual reviews for GIFT 1-3 is in `geology_clean_GIFT1-3.xlsx`
+
+Read in geology_clean_GIFT1-3 with only the cleaned columns:
+
+```{r}
+geology_clean_GIFT1_3 <- read_excel("../data/data_raw/geology_clean_GIFT1-3.xlsx") %>%
+  # select only the manually cleaned columns
+  select(c("entity_ID", "entity_type_clean", "archipelago_clean", "island_type_clean", "geology_ref_clean", "age_Ma_clean", "age_original_clean", "age_ref_clean", "age_comments_clean", "investigator_clean"))
+
+```
+
+```{r}
+# specify age as numeric and set number of sign digits
+geology_clean_GIFT1_3$age_Ma_clean = as.numeric(as.character(geology_clean_GIFT1_3$age_Ma_clean)) 
+geology_clean_GIFT1_3$age_Ma_clean <- round(geology_clean_GIFT1_3$age_Ma_clean, 3)
+```
+
+Combine cleaned geology data to Asteraceae environmental data (`Asteraceae_island_env`) and rearrange the columns to put the cleaned data next to the original.
+
+```{r}
+Asteraceae_island_env <- left_join(
+  Asteraceae_island_env, 
+  geology_clean_GIFT1_3,
+  by = "entity_ID") 
+
+Asteraceae_island_env <- Asteraceae_island_env %>%
+  relocate(entity_type_clean, .after = entity_type) %>%
+  relocate(archipelago_clean, .after = archipelago) %>%
+  relocate(island_type_clean, .after = island_type) %>%
+  relocate(geology_ref_clean, .after = geology_ref) %>%
+  relocate(age_Ma_clean, .after = age_Ma) %>%
+  relocate(age_original_clean, .after = age_original) %>%
+  relocate(age_ref_clean, .after = age_ref) %>%
+  relocate(age_comments_clean, .after = age_comments) %>%
+  relocate(investigator_clean, .after = investigator)
+```
+
+Final updates: remove the original versions of the data and rename cleaned columns (ie remove the label \_clean). (Do not run this code chunk if comparison of the original geology data to the manual clean is needed).
+
+```{r}
+# remove the original version
+Asteraceae_island_env <- Asteraceae_island_env %>% 
+  select(-c("entity_type", "archipelago", "island_type", "geology_ref", "age_Ma", "age_original", "age_ref", "age_comments", "investigator"))
+
+# rename (new = old)
+Asteraceae_island_env <- Asteraceae_island_env %>% 
+  rename(entity_type = entity_type_clean) %>%
+  rename(archipelago = archipelago_clean) %>%
+  rename(island_type = island_type_clean) %>%
+  rename(geology_ref = geology_ref_clean) %>%
+  rename(age_Ma = age_Ma_clean) %>%
+  rename(age_original = age_original_clean) %>%
+  rename(age_ref = age_ref_clean) %>%
+  rename(age_comments = age_comments_clean) %>%
+  rename(investigator = investigator_clean)
+
+# update one miss named entity id
+Asteraceae_island_env$geo_entity[Asteraceae_island_env$geo_entity == "Lady Elliot, Capricornia Cays"] <- "Rapa Iti"
+
+```
+
+# 5. Save cleaned data
+
+Save `Asteraceae_islands_checklists`: the GIFTv3 checklists of all Asteraceae native to islands and associated intrafmaily taxonomy (from GCD) to both `data/data_clean` and `outputs/Supplementary_data`.
+
+```{r}
+write_xlsx(Asteraceae_islands_checklists, "../data/data_clean/Asteraceae_islands_checklists.xlsx")
+
+write_xlsx(Asteraceae_islands_checklists, "../outputs/Supplementary_data/Asteraceae_islands_checklists.xlsx")
+```
+
+Save `References_island_Asteraceae_checklists`: all the primary literature used to build the Asteraceae checklist to both to both `data/data_clean` and `outputs/Supplementary_data`.
+
+```{r}
+write_xlsx(References_island_Asteraceae_checklists, "../data/data_clean/References_island_Asteraceae_checklists.xlsx")
+
+write_xlsx(References_island_Asteraceae_checklists, "../outputs/Supplementary_data/References_island_Asteraceae_checklists.xlsx")
+```
+
+Save `Asteraceae_island_env`: the environmental data (island features, climate, geology and age) associated with each insular unit with native Asteraceae to `data/data_clean`. Next step is to get a count of native endemic species richness per unit in 2_A\_geographic_diversity and save as main supplementary output.
+
+```{r}
+write_xlsx(Asteraceae_island_env, "../data/data_clean/Asteraceae_island_env.xlsx")
+```
+
+Save `Angiosperms_islands_checklists`: the checklists of all the Angiosperm species native to islands to `data/data_clean` and will be used in `1_Angiosperm_insular_diversity script`.
+
+```{r}
+write_xlsx(Angiosperms_islands_checklists, "../data/data_clean/Angiosperms_islands_checklists.xlsx")
+```
+
+Save `References_island_Angiosperm_checklists`: the primary literature used to build the angiosperm checklists to `data/data_clean`.
+
+```{r}
+write_xlsx(References_island_Angiosperm_checklists, "../data/data_clean/References_island_Angiosperm_checklists.xlsx")
+```
