@@ -1,2 +1,4 @@
 # Macroecology_island_Asteraceae
-PhD thesis Chapter 1: Macroecology of insular Asteraceae
+
+Code and data repository for the manuscript "Asteraceae in isolation: diversity and island biogeography of
+the largest plant family"
