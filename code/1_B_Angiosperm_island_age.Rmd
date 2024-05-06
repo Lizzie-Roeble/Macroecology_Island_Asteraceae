@@ -1,0 +1,84 @@
+---
+title: "Distribution of island ages"
+output: html_document
+date: "2024-04-12"
+---
+
+Aim: Compare distribution of island ages to (stem) age of families on islands.
+
+Load libraries:
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(svglite)
+```
+
+Read in (1) island dataset (2) plant families on islands (3) age of families from Ramírez-Barahona 2020 (relaxed calibration and complete fossil dataset, sheet ) (<https://doi.org/10.1038/s41559-020-1241-3>)
+
+```{r}
+islands <- read_xlsx("../data/data_clean/Asteraceae_island_env_diversity.xlsx") 
+
+family_islands <- read_xlsx("../data/data_clean/angio_diversity_islands_all.xlsx")
+
+family_age <- read_xlsx("../data/data_raw/Ramírez-Barahona_2020_NatEcoEvo_Data4_Ages.xlsx", sheet = "RC_complete_ages") %>%
+  rename(Clade = 1)
+```
+
+Merge the plant families on islands with the family age (Ramírez-Barahona 2020) dataset to get the stem ages
+
+```{r}
+# select only stem ages and round
+family_age_stem <- family_age %>%
+  select(c("Clade","Stem_BEAST", "Stem_minHPD", "Stem_maxHPD")) %>%
+  mutate(Stem_BEAST = as.numeric(Stem_BEAST),
+         Stem_minHPD = as.numeric(Stem_minHPD),
+         Stem_maxHPD = as.numeric(Stem_maxHPD)) %>%
+  mutate(across(c(Stem_BEAST, Stem_minHPD, Stem_maxHPD), round))
+  
+# join datasets
+family_islands_age <- left_join(family_islands,
+                                family_age_stem,
+                                by = c("Family" = "Clade"))
+```
+
+Plot the distribution of island ages
+
+```{r}
+ggplot(islands, aes(age_Ma)) +
+  geom_histogram(fill="#8DC63F") +
+  theme_bw()
+```
+
+Plot the distribution of family age
+
+```{r}
+ggplot(family_islands_age, aes(Stem_BEAST)) +
+  geom_histogram(fill="#8B5E3C") +
+  theme_bw()
+# note 3 families do not have an age matching with 
+```
+
+Combine age distributions (islands and families) into one plot
+
+```{r}
+# Combine the data from both datasets into a single data frame
+Ages_df <- data.frame(
+  Age_Ma = islands$age_Ma,
+  Distribution = "Island"
+)
+Ages_df <- rbind(Ages_df, data.frame(Age_Ma = family_islands_age$Stem_BEAST, Distribution = "Family"))
+
+
+age_distribution <- ggplot(Ages_df, aes(x = Age_Ma, fill = Distribution)) +
+  geom_histogram(position = "identity", alpha = 0.75, bins = 30) +
+  scale_fill_manual(values = c("#8DC63F", "#8B5E3C"), name = "Age") +
+  labs(title = "Distribution of island and family ages", x = "Age (Mya)", y = "Frequency") +
+  theme_bw()
+# note islands with no age estimate are removed
+```
+
+```{r}
+ggsave("../outputs/1_Angiosperm_island_diversity/Age_distribution_islands_families_raw.svg", width = 8, height = 5, units = "in")
+```

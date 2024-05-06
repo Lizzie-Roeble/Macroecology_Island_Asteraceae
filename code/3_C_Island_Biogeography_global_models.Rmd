@@ -336,7 +336,6 @@ check_zeroinflation(m_nsr)
 
 ```{r}
 check_model(m_nsr)
-
 ```
 
 **Inspect residuals with DHARMa**
@@ -839,6 +838,183 @@ predictions_ggeffects_nsr_pSIE_log
 ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables_log.svg", predictions_ggeffects_nsr_pSIE_log, width = 200, height = 170, units = "mm")
 ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_significant-variables_log.png", predictions_ggeffects_nsr_pSIE_log, width = 200, height = 170, units = "mm")
 ```
+
+Plot the marginal effects with ggeffect on the log-scale (all predictor variables)
+
+```{r}
+# NSR
+prediction_nsr_area <- ggpredict(m_nsr, terms = "area_log [all]")
+plot_prediction_nsr_area_log <- plot(prediction_nsr_area) + 
+  geom_point(data = island_env_diversity, 
+             aes(x=area_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -1:3, labels = 10^(-1:3)) +
+  labs(x = "Area (km2)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_area_log
+
+prediction_nsr_SLMP <- ggpredict(m_nsr, terms = "SLMP_log [all]")
+plot_prediction_nsr_SLMP_log <- plot(prediction_nsr_SLMP) + 
+  geom_point(data = island_env_diversity, 
+             aes(x=SLMP_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -2:3, labels = 10^(-2:3)) +
+  labs(x = "Isolation (-SLMP)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_SLMP_log
+# note 4 islands do not have SLMP and so will not be plotted with geom_point()
+
+prediction_nsr_itype <- ggpredict(m_nsr, terms = "island_type [all]")
+plot_prediction_nsr_itype <- plot(prediction_nsr_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=Native_species), alpha = 0.3, color = "#003399") +
+  labs(x = "Island type", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_itype
+
+prediction_nsr_maxelev <- ggpredict(m_nsr, terms = "max_mx30_grd_log [all]")
+plot_prediction_nsr_maxelev_log <- plot(prediction_nsr_maxelev) +
+  geom_point(data = island_env_diversity, 
+             aes(x=max_mx30_grd_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -3:2, labels = 10^(-3:2)) +
+  labs(x = "Max elevation (m)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_maxelev_log
+
+prediction_nsr_seasonality <- ggpredict(m_nsr, terms = "mean_CHELSA_bio4_log [all]")
+plot_prediction_nsr_seasonality_log <- plot(prediction_nsr_seasonality) +
+  geom_point(data = island_env_diversity, 
+             aes(x=mean_CHELSA_bio4_log, y=Native_species), 
+             alpha = 0.3, 
+             color = "#003399") +
+  scale_y_continuous(trans = "log10", limits = c(1, 600)) +
+  scale_x_continuous(breaks = -3:2, labels = 10^(-3:2)) +
+  labs(x = "Temperature seasonality (°C)", 
+       y = "Native species richness", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_nsr_seasonality_log
+
+# pSIE
+prediction_pSIE_area <- ggpredict(m_pSIE, terms = "area_log [all]")
+plot_prediction_pSIE_area_log <- plot(prediction_pSIE_area) +
+  geom_point(data = island_env_diversity, 
+             aes(x=area_log, y=pSIE), 
+             alpha = 0.3, 
+             color = "#009999") +
+  scale_x_continuous(breaks = -1:3, labels = 10^(-1:3)) +
+  scale_y_continuous(labels = scales::number_format()) + # converts y from % to numeric and aligns plots
+  labs(x = "Area (km2)", 
+       y = "Proportion endemism (pSIE)", title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_area_log
+
+prediction_pSIE_SLMP <- ggpredict(m_pSIE, terms = "SLMP_log [all]")
+plot_prediction_pSIE_SLMP_log <- plot(prediction_pSIE_SLMP) +
+  geom_point(data = island_env_diversity, 
+             aes(x=SLMP_log, y=pSIE), 
+             alpha = 0.3, color = "#009999") +
+  scale_x_continuous(breaks = -2:3, labels = 10^(-2:3)) +
+  scale_y_continuous(labels = scales::number_format()) + # converts y from % to numeric and aligns plots
+  labs(x = "Isolation (-SLMP)", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_SLMP_log
+
+prediction_pSIE_itype <- ggpredict(m_pSIE, terms = "island_type [all]")
+plot_prediction_pSIE_itype <- plot(prediction_pSIE_itype) + 
+ #geom_jitter(data = island_env_diversity, aes(x=island_type, y=pSIE), alpha = 0.3, color = "#003399") +
+  scale_y_continuous(labels = scales::number_format()) + # converts y from % to numeric and aligns plots
+  labs(x = "Island type", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot_prediction_pSIE_itype
+
+prediction_pSIE_maxelev <- ggpredict(m_pSIE, terms = "max_mx30_grd_log [all]")
+plot_prediction_pSIE_maxelev_log <- plot(prediction_pSIE_maxelev) +
+  geom_point(data = island_env_diversity, 
+             aes(x=max_mx30_grd_log, y=pSIE), 
+             alpha = 0.3, 
+             color = "#009999") +
+  scale_x_continuous(breaks = -3:2, labels = 10^(-3:2)) +
+  scale_y_continuous(labels = scales::number_format()) + # converts y from % to numeric and aligns plots
+  labs(x = "Max elevation (m)", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_maxelev_log
+
+prediction_pSIE_anntemp <- ggpredict(m_pSIE, terms = "mean_CHELSA_bio1 [all]")
+plot_prediction_pSIE_anntemp <- plot(prediction_pSIE_anntemp) +
+  geom_point(data = island_env_diversity, 
+             aes(x=mean_CHELSA_bio1, y=pSIE), 
+             alpha = 0.3, 
+             color = "#009999") +
+  scale_x_continuous(breaks = -4:2, labels = 10^(-4:2)) +
+  scale_y_continuous(labels = scales::number_format()) + # converts y from % to numeric and aligns plots
+  labs(x = "Annual temperature (°C)", 
+       y = "Proportion endemism (pSIE)", 
+       title = NULL) +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+plot_prediction_pSIE_anntemp
+
+
+# Combine
+# 3 columns by 4 rows 
+predictions_ggeffects_nsr_pSIE_log_all_3x4 <- cowplot::plot_grid(plot_prediction_nsr_area_log, plot_prediction_nsr_SLMP_log, plot_prediction_nsr_itype, plot_prediction_nsr_maxelev_log, plot_prediction_nsr_seasonality_log, NULL, plot_prediction_pSIE_area_log, plot_prediction_pSIE_SLMP_log, plot_prediction_pSIE_itype, plot_prediction_pSIE_maxelev_log, plot_prediction_pSIE_anntemp,
+                                                              ncol=3)
+
+predictions_ggeffects_nsr_pSIE_log_all_3x4
+
+# 5 columns by 2 rows 
+predictions_ggeffects_nsr_pSIE_log_all_5x2 <- cowplot::plot_grid(plot_prediction_nsr_area_log, plot_prediction_nsr_SLMP_log, plot_prediction_nsr_itype, plot_prediction_nsr_maxelev_log, plot_prediction_nsr_seasonality_log, plot_prediction_pSIE_area_log, plot_prediction_pSIE_SLMP_log, plot_prediction_pSIE_itype, plot_prediction_pSIE_maxelev_log, plot_prediction_pSIE_anntemp,
+                                                              ncol=5)
+
+predictions_ggeffects_nsr_pSIE_log_all_5x2
+```
+
+```{r}
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_all_log_5x2.svg", predictions_ggeffects_nsr_pSIE_log_all_5x2, width = 200, height = 80, units = "mm")
+
+ggsave("../outputs/3_Island_biogeography_models/predictions_ggeffects_nsr_pSIE_all_log_5x2.png", predictions_ggeffects_nsr_pSIE_log_all_5x2, width = 200, height = 80, units = "mm")
+```
+
+
 
 Note: ggeffects calculates the marginal effects different than marginaleffects (see explanation in the two links above), and gives different prediction values.
 
