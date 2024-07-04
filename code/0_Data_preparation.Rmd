@@ -60,10 +60,6 @@ Set the API.
 
 Note: This is "restricted" api of GIFT offers access to a few resources not publicly available: This include data from the World Checklist of Vascular Plants (WCVP, POWO). (Remove access to restricted API when making code publicly available.)
 
-```{r}
-api <- "https://giftuser:Hepaticanobilis*@gift.uni-goettingen.de/api/restricted/"
-```
-
 Increase the timeout for larger downloads
 
 ```{r}
